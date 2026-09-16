@@ -1,10 +1,10 @@
-# Harness Router · OpenCode (Cloudflare)
+# cloudflare-opencode-runner
 
-**Per-run OpenCode servers on Cloudflare Containers**, built for [Harness Router](https://harness-router.dugongi.com/).
+**Per-run OpenCode servers on Cloudflare Containers**, built for [Harness Router](https://harness-router.dugongi.com/) by [Dugongi](https://dugongi.com/).
 
 When Harness Router delegates a Linear issue to OpenCode, this Worker spins up an **isolated container** for that run, clones the repo, exposes an OpenCode UI link, and destroys the instance on cancel, archive, merge, or after a max lifetime (default **4 hours**).
 
-> Not affiliated with the separate open-source project at [`HarnessRouter/harnessrouter`](https://github.com/HarnessRouter/harnessrouter). This repo is the OpenCode runner for **Harness Router** by [Dugongi](https://dugongi.com/).
+> Not affiliated with the separate open-source project at [`HarnessRouter/harnessrouter`](https://github.com/HarnessRouter/harnessrouter). This repo is the OpenCode runner for **Harness Router** by Dugongi.
 
 ## Features
 

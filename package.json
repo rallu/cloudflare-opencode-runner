@@ -1,5 +1,5 @@
 {
-  "name": "harness-router-opencode",
+  "name": "cloudflare-opencode-runner",
   "version": "0.1.0",
   "type": "module",
   "scripts": {
@@ -17,11 +17,11 @@
     "typescript": "^5.7.0",
     "wrangler": "^4.132.0"
   },
-  "description": "Harness Router OpenCode runner on Cloudflare Containers \u2014 one isolated OpenCode instance per Linear/harness run.",
+  "description": "Per-run OpenCode on Cloudflare Containers \u2014 UI link per run for Linear / Harness Router.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/rallu/harness-router-opencode.git"
+    "url": "https://github.com/rallu/cloudflare-opencode-runner.git"
   },
   "keywords": [
     "harness-router",
