@@ -12,9 +12,17 @@ instance_type = "standard-2"
 name = "OPENCODE_CONTAINER"
 class_name = "OpenCodeContainer"
 
+[[durable_objects.bindings]]
+name = "CAPABILITIES"
+class_name = "CapabilitiesCache"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["OpenCodeContainer"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["CapabilitiesCache"]
 
 [vars]
 # Global defaults; per-run GIT_REPOS override these via the runs API

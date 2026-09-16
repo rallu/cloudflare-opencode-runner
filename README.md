@@ -47,6 +47,20 @@ Enable **Cloudflare Access** on the `workers.dev` route (or custom domain) so th
 
 ## API (for Harness Router)
 
+### Connection health (no container)
+
+`GET /api/health` — authenticated control-plane check. Reports whether a capabilities snapshot exists.
+
+`GET /worker-health` — unauthenticated Worker liveness (for probes that cannot send Access headers).
+
+### Capabilities / model discovery (no container)
+
+`GET /api/capabilities` — last OpenCode providers, models, agents, and commands captured from a live instance.
+
+On every successful `POST /api/runs` bootstrap the runner queries OpenCode (`/global/health`, `/config`, `/config/providers`, `/provider`, `/agent`, `/command`), stores a normalized snapshot in a Durable Object, and returns it on the create response as `capabilities`. Harness Router should use this cache for template pickers; it does **not** start a container.
+
+Until the first successful run, `available` is `false`.
+
 ### Create a run
 
 `POST /api/runs`

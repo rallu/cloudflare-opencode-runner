@@ -79,3 +79,10 @@ Mirror Cursor harness templates:
 
 - Publishing `rallu/harness-router-opencode` (paused).
 - harnessrouter.ai OpenCode backend for Linear UI links.
+
+## Capabilities discovery (no warm instance)
+
+1. On each successful `POST /api/runs`, the runner scrapes OpenCode and stores a snapshot.
+2. Harness Router reads `GET /api/capabilities` (same auth as runs) for template model/agent pickers.
+3. Connection Ready: `GET /api/health` (or `/worker-health` + Access) — do not poll `POST /api/runs`.
+4. First deploy: capabilities stay empty until the first successful run (or admin refresh).
