@@ -939,29 +939,13 @@ function clearOcRunCookieHeader(): string {
   return `${OC_RUN_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=None; Max-Age=0`;
 }
 
-/** Rewrite root-absolute href/src in HTML so assets resolve under /r/:runId/.
- * Also strip <link rel="manifest"> — browsers fetch manifests without cookies,
- * so Cloudflare Access redirects to the login host and CSP blocks it.
+/** Strip PWA manifest from proxied HTML.
+ * Browsers fetch manifests without cookies, so Cloudflare Access redirects to the
+ * login host and CSP blocks it. Asset href/src stay root-absolute (/assets/...) —
+ * the sticky oc_run cookie routes them to the container.
  */
-function rewriteHtmlRootAbsolute(html: string, runId: string): string {
-  const prefix = `/r/${runId}`;
-  // Drop PWA manifest under Access (credentialless fetch → Access login → CSP).
-  let out = html.replace(/<link\b[^>]*\brel=(["'])manifest\1[^>]*>\s*/gi, "");
-  // href="/..." or src="/..." (and single-quoted) — not protocol-relative //
-  out = out.replace(
-    /\b(href|src)=(["'])\/(?!\/)([^"']*)\2/gi,
-    (_m, attr: string, q: string, rest: string) => {
-      // Already under this run prefix — leave alone
-      if (rest === runId || rest.startsWith(`${runId}/`)) {
-        return `${attr}=${q}/${rest}${q}`;
-      }
-      if (rest.startsWith(`r/${runId}/`) || rest === `r/${runId}`) {
-        return `${attr}=${q}/${rest}${q}`;
-      }
-      return `${attr}=${q}${prefix}/${rest}${q}`;
-    },
-  );
-  return out;
+function prepareProxiedHtml(html: string): string {
+  return html.replace(/<link\b[^>]*\brel=(["'])manifest\1[^>]*>\s*/gi, "");
 }
 
 async function proxyToRun(
@@ -1003,10 +987,10 @@ async function proxyToRun(
 
   if (wantRewrite) {
     const html = await upstream.text();
-    const rewritten = rewriteHtmlRootAbsolute(html, runId);
+    const prepared = prepareProxiedHtml(html);
     // Body length changed
     outHeaders.delete("content-length");
-    return new Response(rewritten, {
+    return new Response(prepared, {
       status: upstream.status,
       statusText: upstream.statusText,
       headers: outHeaders,
@@ -1226,7 +1210,35 @@ app.delete("/api/runs/:runId", async (c) => {
   });
 });
 
-// Per-run OpenCode UI + API: /r/:runId/...
+/**
+ * Document entry for a run: 302 → / with sticky oc_run cookie.
+ * OpenCode's SolidJS router uses window.location.pathname; serving the SPA under
+ * /r/:runId/ leaves <main> empty. CSP also blocks inline URL-normalization scripts.
+ * Linear/harness links stay /r/:runId/ (one redirect).
+ */
+function redirectRunDocumentToRoot(runId: string): Response {
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: "/",
+      "Set-Cookie": ocRunCookieHeader(runId),
+    },
+  });
+}
+
+app.get("/r/:runId/", async (c) => {
+  const runId = sanitizeRunId(c.req.param("runId"));
+  if (!runId) return c.text("Invalid run id", 400);
+  return redirectRunDocumentToRoot(runId);
+});
+
+app.get("/r/:runId", async (c) => {
+  const runId = sanitizeRunId(c.req.param("runId"));
+  if (!runId) return c.text("Invalid run id", 400);
+  return redirectRunDocumentToRoot(runId);
+});
+
+// Per-run proxy for assets/API/deep paths: /r/:runId/assets/..., /r/:runId/global/..., etc.
 app.all("/r/:runId/*", async (c) => {
   const runId = sanitizeRunId(c.req.param("runId"));
   if (!runId) return c.text("Invalid run id", 400);
@@ -1235,7 +1247,14 @@ app.all("/r/:runId/*", async (c) => {
   const prefix = `/r/${runId}`;
   let path = url.pathname.slice(prefix.length);
   if (!path.startsWith("/")) path = `/${path}`;
-  if (path === "/") path = "/";
+
+  // Document root under /r/:runId/ — same 302 as dedicated routes (belt-and-suspenders for routers)
+  if (
+    (c.req.method === "GET" || c.req.method === "HEAD") &&
+    (path === "/" || path === "")
+  ) {
+    return redirectRunDocumentToRoot(runId);
+  }
 
   // Rebuild request with container-root path (strip /r/:runId)
   const stripped = new Request(new URL(path + url.search, url.origin).toString(), {
@@ -1245,13 +1264,9 @@ app.all("/r/:runId/*", async (c) => {
     redirect: "manual",
   });
 
+  // HTML under /r/... is uncommon after the document 302; still strip manifest only.
+  // Do not rewrite asset URLs to /r/... — sticky cookie serves /assets at host root.
   return proxyToRun(c.env, runId, stripped, { setStickyCookie: true, rewriteHtml: true });
-});
-
-// Convenience: /r/:runId → /r/:runId/
-app.get("/r/:runId", (c) => {
-  const runId = c.req.param("runId");
-  return c.redirect(`/r/${encodeURIComponent(runId)}/`, 302);
 });
 
 app.use("/admin/*", cors());

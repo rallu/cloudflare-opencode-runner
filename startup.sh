@@ -10,9 +10,12 @@ echo "which node: $(command -v node || echo MISSING)" >> /tmp/opencode.log
 if [ -n "$GIT_TOKEN" ]; then
   git config --global url."https://${GIT_TOKEN}@github.com/".insteadOf "https://github.com/" >> /tmp/opencode.log 2>&1 || true
 fi
+FIRST_REPO_DIR=""
 if [ -n "$GIT_REPOS" ]; then
   IFS=',' read -ra REPOS <<< "$GIT_REPOS"
   for repo in "${REPOS[@]}"; do
+    repo="$(echo "$repo" | xargs)"
+    [ -z "$repo" ] && continue
     repo_name=$(basename "$repo" .git)
     if [ ! -d "$repo_name" ]; then
       echo "Cloning $repo..." >> /tmp/opencode.log
@@ -25,10 +28,22 @@ if [ -n "$GIT_REPOS" ]; then
     if [ -n "$RUN_BRANCH" ] && [ -d "$repo_name" ]; then
       (cd "$repo_name" && git fetch origin "$RUN_BRANCH" && git checkout "$RUN_BRANCH") >> /tmp/opencode.log 2>&1 || true
     fi
+    if [ -z "$FIRST_REPO_DIR" ] && [ -d "$repo_name" ]; then
+      FIRST_REPO_DIR="/home/dev/$repo_name"
+    fi
   done
 fi
 
-echo "Starting OpenCode on 0.0.0.0:4096..." >> /tmp/opencode.log
+# Serve from the first cloned repo so OpenCode's default /path is the git worktree
+# (project list includes the real project, not only global "/").
+if [ -n "$FIRST_REPO_DIR" ]; then
+  echo "cd into worktree $FIRST_REPO_DIR before opencode serve" >> /tmp/opencode.log
+  cd "$FIRST_REPO_DIR" || echo "Failed to cd $FIRST_REPO_DIR" >> /tmp/opencode.log
+elif [ -n "$GIT_REPOS" ]; then
+  echo "GIT_REPOS set but no cloned repo dir found; staying in $(pwd)" >> /tmp/opencode.log
+fi
+
+echo "Starting OpenCode on 0.0.0.0:4096 from $(pwd)..." >> /tmp/opencode.log
 opencode serve --port 4096 --hostname 0.0.0.0 >> /tmp/opencode.log 2>&1 &
 OPID=$!
 echo "opencode pid=$OPID" >> /tmp/opencode.log
