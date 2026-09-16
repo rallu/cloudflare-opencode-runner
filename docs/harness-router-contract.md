@@ -43,18 +43,20 @@ Response `201`:
 ```json
 {
   "runId": "...",
-  "url": "https://opencode-server.rubikc.workers.dev/r/<runId>/",
-  "openCodeUrl": "https://opencode-server.rubikc.workers.dev/r/<runId>/",
+  "url": "https://opencode-server.rubikc.workers.dev/r/<runId>/<cn(dir)>/session/<sessionId>",
+  "openCodeUrl": "https://opencode-server.rubikc.workers.dev/r/<runId>/<cn(dir)>/session/<sessionId>",
   "sessionId": "ses_…",
   "promptAccepted": true,
   "prompt": { "ok": true, "sessionId": "ses_…", "promptAccepted": true, "directory": "/home/dev/repo" },
   "links": {
-    "ui": "https://opencode-server.rubikc.workers.dev/r/<runId>/",
+    "ui": "https://opencode-server.rubikc.workers.dev/r/<runId>/<cn(dir)>/session/<sessionId>",
     "health": "https://opencode-server.rubikc.workers.dev/r/<runId>/global/health",
     "openapi": "https://opencode-server.rubikc.workers.dev/r/<runId>/doc"
   }
 }
 ```
+
+When `sessionId` + `directory` are present, `openCodeUrl` / `url` / `links.ui` are a **session deep link** under `/r/<runId>/…/session/…` (not the empty Projects home). Without a prompt session they remain `/r/<runId>/`. `GET /r/:runId` and `GET /r/:runId/` 302 to that deep link when meta has the session.
 
 Container ready still returns `success: true` even if session/prompt fails; check `prompt.ok` / `prompt.error`.
 

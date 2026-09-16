@@ -9,7 +9,7 @@ When Harness Router delegates a Linear issue to OpenCode, this Worker spins up a
 ## Features
 
 - **One container per run** — Durable Object keyed by `runId`
-- **UI link for humans** — `https://<worker>/r/<runId>/` (put behind Cloudflare Access)
+- **UI link for humans** — `https://<worker>/r/<runId>/…/session/…` when auto-prompted (else `/r/<runId>/`; Access-protected)
 - **Automation API** — `POST /api/runs` returns `openCodeUrl` for Linear comments
 - **Low concurrency** — default `max_instances = 4`
 - **Hard TTL** — DO alarm destroys the instance after 4 hours
@@ -22,7 +22,7 @@ Linear → Harness Router → POST /api/runs → Cloudflare Worker
                               ↓
                      Container (OpenCode serve)
                               ↓
-              openCodeUrl → /r/:runId/  (Access-protected UI)
+              openCodeUrl → /r/:runId/…/session/…  (Access-protected UI; deep link when prompted)
 ```
 
 ## Prerequisites
@@ -86,7 +86,7 @@ Optional fields:
 - **`setup`** — shell commands in the first cloned repo after clone, before OpenCode starts. A failing command fails startup (surfaces in bootstrap error / crash log).
 - **`prompt`** — after the container is ready, auto-create a session and `prompt_async`. Default model is `opencode` / `big-pickle` when omitted. Response includes `sessionId`, `promptAccepted`, and `prompt: { ok, sessionId, error? }`. Session failures do not mark the run as failed (`success: true` if the container is ready).
 
-Response includes `openCodeUrl` / `url` pointing at `/r/<runId>/` — put that link in Linear.
+Response includes `openCodeUrl` / `url` — when a prompt auto-starts a session this is a **session deep link** (`/r/<runId>/<cn(dir)>/session/<sessionId>`); otherwise `/r/<runId>/`. Opening either shows the chat (document entry 302s to the session when meta has `sessionId`+`directory`). Put that link in Linear.
 
 ### Status / destroy
 

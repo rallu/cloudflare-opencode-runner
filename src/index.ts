@@ -29,6 +29,8 @@ type RunMeta = {
   error?: string;
   /** Auto-prompt session created after bootstrap (if prompt was requested). */
   sessionId?: string;
+  /** Working directory used for the auto-prompt session (for UI deep links). */
+  directory?: string;
 };
 
 /** Cached OpenCode discovery for harness-router (no live instance required). */
@@ -810,6 +812,7 @@ export class OpenCodeRunner extends Container<Env> {
         });
         if (prompt.sessionId) {
           meta.sessionId = prompt.sessionId;
+          if (prompt.directory) meta.directory = prompt.directory;
           await this.saveMeta(meta);
         }
       }
@@ -1078,6 +1081,46 @@ function runUrl(requestUrl: string, runId: string): string {
   return `${u.origin}/r/${encodeURIComponent(runId)}/`;
 }
 
+/**
+ * OpenCode client encodes project directory as base64url (no padding), matching
+ * the SPA helper cn(dir) = btoa(dir).replace(/+/g,'-').replace(/\//g,'_').replace(/=/g,'').
+ */
+function encodeOpenCodeDir(directory: string): string {
+  // Paths are ASCII (/home/dev/...); btoa matches the browser OpenCode bundle.
+  return btoa(directory).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+}
+
+/** Client route after /r/:runId strip: /${cn(directory)}/session/${sessionId} */
+function sessionDeepPath(directory: string, sessionId: string): string {
+  return `/${encodeOpenCodeDir(directory)}/session/${encodeURIComponent(sessionId)}`;
+}
+
+/** Public UI URL deep-linking into an auto-started session (still under /r/:runId/). */
+function runSessionUrl(
+  originOrRequestUrl: string,
+  runId: string,
+  directory: string,
+  sessionId: string,
+): string {
+  const origin = originOrRequestUrl.includes("://")
+    ? new URL(originOrRequestUrl).origin
+    : originOrRequestUrl;
+  return `${origin}/r/${encodeURIComponent(runId)}${sessionDeepPath(directory, sessionId)}`;
+}
+
+/** Prefer session deep link when meta/prompt has sessionId + directory. */
+function openCodeUiUrl(
+  requestUrl: string,
+  runId: string,
+  opts?: { sessionId?: string | null; directory?: string | null },
+): string {
+  const sessionId = opts?.sessionId?.trim();
+  const directory = opts?.directory?.trim();
+  if (sessionId && directory) {
+    return runSessionUrl(requestUrl, runId, directory, sessionId);
+  }
+  return runUrl(requestUrl, runId);
+}
 
 const OC_RUN_COOKIE = "oc_run";
 const OC_RUN_COOKIE_MAX_AGE = 14400; // match default 4h run TTL
@@ -1433,7 +1476,17 @@ async function createRunResponse(
   );
 
   const payload = (await bootstrap.json().catch(() => ({}))) as Record<string, unknown>;
-  const url = runUrl(requestUrl, runId);
+  const prompt = payload.prompt as PromptResult | undefined;
+  const sessionId =
+    (typeof payload.sessionId === "string" && payload.sessionId) ||
+    prompt?.sessionId ||
+    undefined;
+  const directory =
+    (typeof prompt?.directory === "string" && prompt.directory) ||
+    (sessionId ? worktreeDirectory(body.repo) : undefined);
+  const url = openCodeUiUrl(requestUrl, runId, { sessionId, directory });
+  // Asset/API links stay on the run root (not the session deep path).
+  const rootUrl = runUrl(requestUrl, runId);
 
   if (!bootstrap.ok) {
     return new Response(JSON.stringify({ ...payload, url, openCodeUrl: url }), {
@@ -1449,8 +1502,8 @@ async function createRunResponse(
       openCodeUrl: url,
       links: {
         ui: url,
-        health: `${url}global/health`,
-        openapi: `${url}doc`,
+        health: `${rootUrl}global/health`,
+        openapi: `${rootUrl}doc`,
         capabilities: new URL("/api/capabilities", requestUrl).toString(),
       },
     }),
@@ -1507,7 +1560,11 @@ app.get("/api/runs/:runId", async (c) => {
   const container = getContainer(c.env.OPENCODE_CONTAINER, runId);
   const statusResp = await container.fetch(new Request("http://localhost/__admin/status"));
   const status = (await statusResp.json().catch(() => ({}))) as Record<string, unknown>;
-  const url = runUrl(c.req.url, runId);
+  const runMeta = (status.run || null) as RunMeta | null;
+  const url = openCodeUiUrl(c.req.url, runId, {
+    sessionId: runMeta?.sessionId,
+    directory: runMeta?.directory || (runMeta?.sessionId ? worktreeDirectory(runMeta.repo) : undefined),
+  });
   return c.json({ runId, url, openCodeUrl: url, ...status });
 });
 
@@ -1552,6 +1609,44 @@ async function proxyRunDocument(env: Env, runId: string, request: Request): Prom
   });
 }
 
+/** Load RunMeta from the run DO via __admin/status (no container start required for storage read). */
+async function loadRunMeta(env: Env, runId: string): Promise<RunMeta | null> {
+  try {
+    const container = getContainer(env.OPENCODE_CONTAINER, runId);
+    const statusResp = await container.fetch(new Request("http://localhost/__admin/status"));
+    const status = (await statusResp.json().catch(() => null)) as { run?: RunMeta } | null;
+    return status?.run ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * If the run has an auto-started session, 302 under /r/:runId/…/session/… so the
+ * OpenCode SPA opens the chat immediately (shim strips only /r/:runId).
+ */
+async function maybeRedirectToSession(
+  env: Env,
+  runId: string,
+  request: Request,
+): Promise<Response | null> {
+  const meta = await loadRunMeta(env, runId);
+  const sessionId = meta?.sessionId?.trim();
+  const directory = (meta?.directory || (sessionId ? worktreeDirectory(meta?.repo) : undefined))?.trim();
+  if (!sessionId || !directory) return null;
+  const dest = `/r/${encodeURIComponent(runId)}${sessionDeepPath(directory, sessionId)}`;
+  // Preserve query string (rare) but stay under /r/
+  const url = new URL(request.url);
+  const location = dest + (url.search || "");
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: location,
+      "Set-Cookie": ocRunCookieHeader(runId),
+    },
+  });
+}
+
 app.get("/r/:runId/__oc-shim.js", async (c) => {
   const runId = sanitizeRunId(c.req.param("runId"));
   if (!runId) return c.text("Invalid run id", 400);
@@ -1561,12 +1656,16 @@ app.get("/r/:runId/__oc-shim.js", async (c) => {
 app.get("/r/:runId/", async (c) => {
   const runId = sanitizeRunId(c.req.param("runId"));
   if (!runId) return c.text("Invalid run id", 400);
+  const redirect = await maybeRedirectToSession(c.env, runId, c.req.raw);
+  if (redirect) return redirect;
   return proxyRunDocument(c.env, runId, c.req.raw);
 });
 
 app.get("/r/:runId", async (c) => {
   const runId = sanitizeRunId(c.req.param("runId"));
   if (!runId) return c.text("Invalid run id", 400);
+  const redirect = await maybeRedirectToSession(c.env, runId, c.req.raw);
+  if (redirect) return redirect;
   // Keep trailing slash URL as canonical for assets/relative resolution
   const dest = `/r/${runId}/`;
   return new Response(null, {
@@ -1593,10 +1692,21 @@ app.all("/r/:runId/*", async (c) => {
     return ocShimResponse(runId);
   }
 
-  // Document root under /r/:runId/ — proxy SPA HTML (do NOT 302 to domain root)
+  // Document root under /r/:runId/ — session deep link or SPA HTML (never 302 to domain /)
   if (
     (c.req.method === "GET" || c.req.method === "HEAD") &&
     (path === "/" || path === "")
+  ) {
+    const redirect = await maybeRedirectToSession(c.env, runId, c.req.raw);
+    if (redirect) return redirect;
+    return proxyRunDocument(c.env, runId, c.req.raw);
+  }
+
+  // SPA deep link /${cn(dir)}/session/:id — serve index HTML so Solid can route
+  // (shim strips /r/:runId; forwarding the deep path to OpenCode would often 404).
+  if (
+    (c.req.method === "GET" || c.req.method === "HEAD") &&
+    /^\/[^/]+\/session\/[^/]+\/?$/.test(path)
   ) {
     return proxyRunDocument(c.env, runId, c.req.raw);
   }
