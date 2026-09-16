@@ -43,6 +43,30 @@ elif [ -n "$GIT_REPOS" ]; then
   echo "GIT_REPOS set but no cloned repo dir found; staying in $(pwd)" >> /tmp/opencode.log
 fi
 
+# Optional post-clone setup (e.g. npm install). Fail startup on non-zero so bootstrap surfaces errors.
+# SETUP_COMMANDS: newline-separated and/or |||-separated commands from the Worker.
+if [ -n "$SETUP_COMMANDS" ]; then
+  echo "Running SETUP_COMMANDS in $(pwd)..." >> /tmp/opencode.log
+  # Normalize ||| separators to newlines, then run each non-empty line
+  _setup_raw="$(printf '%s' "$SETUP_COMMANDS" | sed 's/|||/\n/g')"
+  while IFS= read -r _cmd || [ -n "$_cmd" ]; do
+    # trim leading/trailing whitespace
+    _cmd="$(printf '%s' "$_cmd" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    [ -z "$_cmd" ] && continue
+    echo "+ bash -lc: $_cmd" >> /tmp/opencode.log
+    if ! bash -lc "$_cmd" >> /tmp/opencode.log 2>&1; then
+      _ec=$?
+      echo "SETUP_COMMAND failed (exit $_ec): $_cmd" >> /tmp/opencode.log
+      echo "SETUP_COMMAND failed (exit $_ec): $_cmd" >&2
+      exit 1
+    fi
+    echo "SETUP_COMMAND ok: $_cmd" >> /tmp/opencode.log
+  done <<EOF
+${_setup_raw}
+EOF
+  echo "SETUP_COMMANDS finished successfully" >> /tmp/opencode.log
+fi
+
 echo "Starting OpenCode on 0.0.0.0:4096 from $(pwd)..." >> /tmp/opencode.log
 opencode serve --port 4096 --hostname 0.0.0.0 >> /tmp/opencode.log 2>&1 &
 OPID=$!

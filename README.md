@@ -74,9 +74,17 @@ Content-Type: application/json
 {
   "runId": "ENG-142",
   "repo": "https://github.com/org/repo.git",
-  "branch": "main"
+  "branch": "main",
+  "setup": ["npm install"],
+  "prompt": "Fix the failing test and open a PR.",
+  "title": "ENG-142",
+  "model": { "providerID": "opencode", "modelID": "big-pickle" }
 }
 ```
+
+Optional fields:
+- **`setup`** — shell commands in the first cloned repo after clone, before OpenCode starts. A failing command fails startup (surfaces in bootstrap error / crash log).
+- **`prompt`** — after the container is ready, auto-create a session and `prompt_async`. Default model is `opencode` / `big-pickle` when omitted. Response includes `sessionId`, `promptAccepted`, and `prompt: { ok, sessionId, error? }`. Session failures do not mark the run as failed (`success: true` if the container is ready).
 
 Response includes `openCodeUrl` / `url` pointing at `/r/<runId>/` — put that link in Linear.
 
@@ -87,7 +95,7 @@ Response includes `openCodeUrl` / `url` pointing at `/r/<runId>/` — put that l
 
 ### OpenCode session API
 
-Drive OpenCode under `/r/:runId/` (see OpenCode `/doc`), e.g. `POST /r/:runId/session`, `POST /r/:runId/session/:id/message`, SSE `GET /r/:runId/event`.
+Drive OpenCode under `/r/:runId/` (see OpenCode `/doc`), e.g. `POST /r/:runId/session`, `POST /r/:runId/session/:id/prompt_async`, SSE `GET /r/:runId/event`. With sticky `oc_run` cookie (after opening the UI once), root `/session/...` also proxies to the run.
 
 ## Configuration
 
@@ -98,6 +106,15 @@ Drive OpenCode under `/r/:runId/` (see OpenCode `/doc`), e.g. `POST /r/:runId/se
 | `OPENCODE_API_KEY` | secret | required |
 | `GIT_TOKEN` | secret | optional |
 | `RUNNER_API_TOKEN` | secret | optional (if unset, rely on Access alone) |
+
+## Browser admin vs automation API
+
+| Surface | Auth | Purpose |
+|--------|------|---------|
+| `GET /admin`, `/admin/api/*` | Cloudflare Access (browser / Access service token) | Human admin UI — list/create/start/stop/destroy. **No** `RUNNER_API_TOKEN`. |
+| `/api/runs*`, `/api/capabilities`, `/api/health` | Access + optional `Authorization: Bearer $RUNNER_API_TOKEN` | Harness Router automation |
+
+Do not call `/api/runs` from the browser admin — it returns 401 without the runner bearer.
 
 ## Security notes
 

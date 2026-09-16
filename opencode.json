@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "opencode/claude-sonnet-4",
+  "model": "opencode/big-pickle",
   "autoupdate": false,
   "share": "disabled"
 }

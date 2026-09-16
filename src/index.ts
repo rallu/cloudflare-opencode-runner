@@ -21,10 +21,14 @@ type RunMeta = {
   runId: string;
   repo?: string;
   branch?: string;
+  /** Post-clone shell commands (first repo). Also passed as SETUP_COMMANDS env. */
+  setup?: string[];
   createdAt: number;
   expiresAt: number;
   status: "starting" | "ready" | "error" | "stopped" | "destroyed";
   error?: string;
+  /** Auto-prompt session created after bootstrap (if prompt was requested). */
+  sessionId?: string;
 };
 
 /** Cached OpenCode discovery for harness-router (no live instance required). */
@@ -51,8 +55,14 @@ export type RunnerCapabilities = {
 
 const FOUR_HOURS_MS = 4 * 60 * 60 * 1000;
 const START_WAIT = {
-  portReadyTimeoutMS: 180_000,
+  // Setup (e.g. npm install) runs before opencode serve; allow slow clones/installs.
+  portReadyTimeoutMS: 300_000,
   instanceGetTimeoutMS: 60_000,
+} as const;
+
+const DEFAULT_PROMPT_MODEL = {
+  providerID: "opencode",
+  modelID: "big-pickle",
 } as const;
 
 const CONTAINER_START = {
@@ -325,6 +335,29 @@ export class RunsRegistry extends DurableObject<Env> {
   }
 }
 
+function repoBasename(repo: string | undefined | null): string | null {
+  if (!repo?.trim()) return null;
+  const cleaned = repo.trim().replace(/\/+$/, "");
+  const base = cleaned.split("/").pop() || "";
+  const name = base.replace(/\.git$/i, "");
+  return name || null;
+}
+
+/** OpenCode working directory for the first cloned repo (matches startup.sh). */
+function worktreeDirectory(repo: string | undefined | null): string {
+  const name = repoBasename(repo);
+  return name ? `/home/dev/${name}` : "/home/dev";
+}
+
+export type PromptResult = {
+  ok: boolean;
+  sessionId?: string;
+  promptAccepted?: boolean;
+  title?: string;
+  directory?: string;
+  error?: string;
+};
+
 export class OpenCodeRunner extends Container<Env> {
   defaultPort = 4096;
   // Idle sleep; hard TTL is enforced via DO alarm (~4h)
@@ -348,6 +381,7 @@ export class OpenCodeRunner extends Container<Env> {
     const repo = meta?.repo?.trim();
     const branch = meta?.branch?.trim();
     let gitRepos = repo || this.env.GIT_REPOS || "";
+    const setupCmds = (meta?.setup || []).map((c) => String(c).trim()).filter(Boolean);
     return {
       OPENCODE_PERMISSION: '{"edit":"allow","bash":"allow","write":"allow"}',
       OPENCODE_DISABLE_AUTOUPDATE: "true",
@@ -356,6 +390,8 @@ export class OpenCodeRunner extends Container<Env> {
       GIT_TOKEN: this.env.GIT_TOKEN || "",
       RUN_ID: meta?.runId || "",
       RUN_BRANCH: branch || "",
+      // Newline-separated; startup.sh also accepts ||| separators.
+      SETUP_COMMANDS: setupCmds.join("\n"),
     };
   }
 
@@ -554,16 +590,120 @@ export class OpenCodeRunner extends Container<Env> {
     return json({ success: true, capabilities });
   }
 
+  private async autoCreateSessionAndPrompt(opts: {
+    repo?: string;
+    prompt: string;
+    title?: string;
+    model?: { providerID: string; modelID: string };
+    agent?: string;
+  }): Promise<PromptResult> {
+    const directory = worktreeDirectory(opts.repo);
+    const title =
+      (opts.title && opts.title.trim()) ||
+      opts.prompt.trim().slice(0, 80) ||
+      "Auto session";
+    const model = opts.model?.providerID && opts.model?.modelID
+      ? opts.model
+      : { ...DEFAULT_PROMPT_MODEL };
+
+    try {
+      const sessionResp = await this.containerFetch(
+        new Request(
+          `http://127.0.0.1:${this.defaultPort}/session?directory=${encodeURIComponent(directory)}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title }),
+          },
+        ),
+        this.defaultPort,
+      );
+      if (!sessionResp.ok) {
+        const body = await sessionResp.text().catch(() => "");
+        return {
+          ok: false,
+          title,
+          directory,
+          error: `session create failed: ${sessionResp.status} ${body.slice(0, 500)}`,
+        };
+      }
+      const session = (await sessionResp.json()) as { id?: string };
+      const sessionId = session?.id;
+      if (!sessionId) {
+        return {
+          ok: false,
+          title,
+          directory,
+          error: "session create returned no id",
+        };
+      }
+
+      const promptBody: Record<string, unknown> = {
+        parts: [{ type: "text", text: opts.prompt }],
+        model,
+      };
+      if (opts.agent) promptBody.agent = opts.agent;
+
+      const promptResp = await this.containerFetch(
+        new Request(
+          `http://127.0.0.1:${this.defaultPort}/session/${encodeURIComponent(sessionId)}/prompt_async?directory=${encodeURIComponent(directory)}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(promptBody),
+          },
+        ),
+        this.defaultPort,
+      );
+
+      // OpenCode returns 204 when prompt_async is accepted
+      if (promptResp.status === 204 || promptResp.ok) {
+        return {
+          ok: true,
+          sessionId,
+          promptAccepted: true,
+          title,
+          directory,
+        };
+      }
+      const errBody = await promptResp.text().catch(() => "");
+      return {
+        ok: false,
+        sessionId,
+        promptAccepted: false,
+        title,
+        directory,
+        error: `prompt_async failed: ${promptResp.status} ${errBody.slice(0, 500)}`,
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        title,
+        directory,
+        error: e instanceof Error ? e.message : String(e),
+      };
+    }
+  }
+
   private async doBootstrap(request: Request): Promise<Response> {
     const body = (await request.json().catch(() => ({}))) as {
       runId?: string;
       repo?: string;
       branch?: string;
       maxLifetimeMs?: number;
+      prompt?: string;
+      title?: string;
+      model?: { providerID: string; modelID: string };
+      agent?: string;
+      setup?: string[];
     };
 
     const runId = sanitizeRunId(body.runId || "");
     if (!runId) return json({ error: "Invalid runId" }, 400);
+
+    const setup = Array.isArray(body.setup)
+      ? body.setup.map((c) => String(c)).filter((c) => c.trim())
+      : undefined;
 
     const maxLifetimeMs = Math.min(
       Math.max(Number(body.maxLifetimeMs || this.env.MAX_RUN_LIFETIME_MS || FOUR_HOURS_MS), 60_000),
@@ -576,6 +716,7 @@ export class OpenCodeRunner extends Container<Env> {
       runId,
       repo: body.repo,
       branch: body.branch,
+      setup,
       createdAt,
       expiresAt,
       status: "starting",
@@ -657,6 +798,22 @@ export class OpenCodeRunner extends Container<Env> {
       // Capture models/agents/providers for harness-router (served later without an instance).
       const capabilities = await this.collectAndStoreCapabilities(runId);
 
+      let prompt: PromptResult | undefined;
+      const promptText = typeof body.prompt === "string" ? body.prompt.trim() : "";
+      if (promptText) {
+        prompt = await this.autoCreateSessionAndPrompt({
+          repo: body.repo,
+          prompt: promptText,
+          title: body.title,
+          model: body.model,
+          agent: body.agent,
+        });
+        if (prompt.sessionId) {
+          meta.sessionId = prompt.sessionId;
+          await this.saveMeta(meta);
+        }
+      }
+
       return json({
         success: true,
         runId,
@@ -665,6 +822,13 @@ export class OpenCodeRunner extends Container<Env> {
         expiresAt,
         expiresAtIso: new Date(expiresAt).toISOString(),
         capabilities,
+        ...(prompt
+          ? {
+              prompt,
+              sessionId: prompt.sessionId,
+              promptAccepted: prompt.promptAccepted ?? prompt.ok,
+            }
+          : {}),
       });
     } catch (error) {
       meta.status = "error";
@@ -1091,21 +1255,28 @@ app.get("/api/capabilities", async (c) => {
   });
 });
 
-/** Create / ensure a per-run OpenCode instance. Returns a UI link for harness-router. */
-app.post("/api/runs", async (c) => {
-  if (!requireRunnerAuth(c)) return c.json({ error: "Unauthorized" }, 401);
+export type CreateRunBody = {
+  runId?: string;
+  repo?: string;
+  branch?: string;
+  maxLifetimeMs?: number;
+  prompt?: string;
+  title?: string;
+  model?: { providerID: string; modelID: string };
+  agent?: string;
+  setup?: string[];
+};
 
-  const body = (await c.req.json().catch(() => ({}))) as {
-    runId?: string;
-    repo?: string;
-    branch?: string;
-    maxLifetimeMs?: number;
-  };
-
+/** Shared bootstrap for POST /api/runs (bearer) and POST /admin/api/create (Access). */
+async function createRunResponse(
+  env: Env,
+  requestUrl: string,
+  body: CreateRunBody,
+): Promise<Response> {
   const runId = sanitizeRunId(body.runId || crypto.randomUUID());
-  if (!runId) return c.json({ error: "Invalid runId" }, 400);
+  if (!runId) return json({ error: "Invalid runId" }, 400);
 
-  const container = getContainer(c.env.OPENCODE_CONTAINER, runId);
+  const container = getContainer(env.OPENCODE_CONTAINER, runId);
   const bootstrap = await container.fetch(
     new Request("http://localhost/__admin/bootstrap", {
       method: "POST",
@@ -1115,12 +1286,17 @@ app.post("/api/runs", async (c) => {
         repo: body.repo,
         branch: body.branch,
         maxLifetimeMs: body.maxLifetimeMs,
+        prompt: body.prompt,
+        title: body.title,
+        model: body.model,
+        agent: body.agent,
+        setup: body.setup,
       }),
     }),
   );
 
   const payload = (await bootstrap.json().catch(() => ({}))) as Record<string, unknown>;
-  const url = runUrl(c.req.url, runId);
+  const url = runUrl(requestUrl, runId);
 
   if (!bootstrap.ok) {
     return new Response(JSON.stringify({ ...payload, url, openCodeUrl: url }), {
@@ -1129,8 +1305,8 @@ app.post("/api/runs", async (c) => {
     });
   }
 
-  return c.json(
-    {
+  return new Response(
+    JSON.stringify({
       ...payload,
       url,
       openCodeUrl: url,
@@ -1138,11 +1314,21 @@ app.post("/api/runs", async (c) => {
         ui: url,
         health: `${url}global/health`,
         openapi: `${url}doc`,
-        capabilities: new URL("/api/capabilities", c.req.url).toString(),
+        capabilities: new URL("/api/capabilities", requestUrl).toString(),
       },
+    }),
+    {
+      status: 201,
+      headers: { "Content-Type": "application/json" },
     },
-    201,
   );
+}
+
+/** Create / ensure a per-run OpenCode instance. Returns a UI link for harness-router. */
+app.post("/api/runs", async (c) => {
+  if (!requireRunnerAuth(c)) return c.json({ error: "Unauthorized" }, 401);
+  const body = (await c.req.json().catch(() => ({}))) as CreateRunBody;
+  return createRunResponse(c.env, c.req.url, body);
 });
 
 /** List runs from the registry (no container start). */
@@ -1273,7 +1459,8 @@ app.use("/admin/*", cors());
 
 app.get("/admin", (c) => c.html(getAdminHTML()));
 
-// Admin helpers: list from registry (no bearer); actions take ?runId=
+// Admin helpers (Cloudflare Access only — no RUNNER_API_TOKEN).
+// Browser UI uses these; harness-router uses /api/runs* with bearer.
 app.all("/admin/api/:action", async (c) => {
   const action = c.req.param("action");
   try {
@@ -1281,14 +1468,40 @@ app.all("/admin/api/:action", async (c) => {
       const runs = await registryList(c.env);
       return c.json({ runs });
     }
+
+    // Create / bootstrap a run (same path as POST /api/runs, without bearer).
+    if (action === "create" || action === "bootstrap") {
+      if (c.req.method !== "POST") return c.json({ error: "Method not allowed" }, 405);
+      const body = (await c.req.json().catch(() => ({}))) as CreateRunBody;
+      // Allow runId via query as well for convenience
+      if (!body.runId && c.req.query("runId")) {
+        body.runId = c.req.query("runId") || undefined;
+      }
+      return createRunResponse(c.env, c.req.url, body);
+    }
+
     const runId = sanitizeRunId(c.req.query("runId") || "opencode-main");
     if (!runId) return c.json({ error: "Invalid runId" }, 400);
     const container = getContainer(c.env.OPENCODE_CONTAINER, runId);
     if (action === "status" || action === "config") {
       return container.fetch(new Request(`http://localhost/__admin/${action}`));
     }
-    if (["start", "stop", "restart", "destroy", "refresh-capabilities"].includes(action)) {
+    if (["start", "stop", "restart", "refresh-capabilities"].includes(action)) {
       return container.fetch(new Request(`http://localhost/__admin/${action}`, { method: "POST" }));
+    }
+    if (action === "destroy") {
+      if (c.req.method !== "POST" && c.req.method !== "DELETE") {
+        return c.json({ error: "Method not allowed" }, 405);
+      }
+      const destroyResp = await container.fetch(
+        new Request("http://localhost/__admin/destroy", { method: "POST" }),
+      );
+      const payload = (await destroyResp.json().catch(() => ({}))) as Record<string, unknown>;
+      await registryRemove(c.env, runId);
+      return new Response(JSON.stringify({ runId, ...payload }), {
+        status: destroyResp.status,
+        headers: { "Content-Type": "application/json" },
+      });
     }
     return c.json({ error: "Unknown action" }, 404);
   } catch (error) {
@@ -1338,6 +1551,8 @@ app.all("*", async (c) => {
       capabilities: "GET /api/capabilities",
       health: "GET /api/health",
       admin: "GET /admin",
+      adminCreate: "POST /admin/api/create",
+      adminList: "GET /admin/api/list",
     },
     404,
   );

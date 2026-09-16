@@ -21,7 +21,7 @@ export function getAdminHTML(): string {
     <div class="flex items-center justify-between mb-8">
       <div>
         <h1 class="text-3xl font-bold">OpenCode Runner Admin</h1>
-        <p class="text-gray-400 mt-1">List and control per-run container instances</p>
+        <p class="text-gray-400 mt-1">Browser admin via /admin/api (Access). Automation uses /api/runs + bearer.</p>
       </div>
       <div class="flex items-center gap-3">
         <button onclick="createRun()" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded text-sm font-medium">Create run</button>
@@ -86,12 +86,8 @@ export function getAdminHTML(): string {
     }
 
     async function loadRuns() {
-      // Prefer public API (Access cookie). Fallback to admin list (no bearer).
-      let data = await fetchJSON('/api/runs');
-      if (data.error || !Array.isArray(data.runs)) {
-        data = await fetchJSON('/admin/api/list');
-      }
-      return data;
+      // Browser admin uses /admin/api/* only (Access cookie). Never call /api/runs (bearer).
+      return fetchJSON('/admin/api/list');
     }
 
     async function refreshRuns() {
@@ -180,18 +176,10 @@ export function getAdminHTML(): string {
         return;
       }
       showResult(action + ' ' + selectedRunId + '...', 'info');
-      let data;
-      if (action === 'destroy') {
-        data = await fetchJSON('/api/runs/' + encodeURIComponent(selectedRunId), { method: 'DELETE' });
-        if (data.error) {
-          data = await fetchJSON('/admin/api/destroy?runId=' + encodeURIComponent(selectedRunId), { method: 'POST' });
-        }
-      } else {
-        data = await fetchJSON('/api/runs/' + encodeURIComponent(selectedRunId) + '/' + action, { method: 'POST' });
-        if (data.error) {
-          data = await fetchJSON('/admin/api/' + action + '?runId=' + encodeURIComponent(selectedRunId), { method: 'POST' });
-        }
-      }
+      const data = await fetchJSON(
+        '/admin/api/' + action + '?runId=' + encodeURIComponent(selectedRunId),
+        { method: 'POST' },
+      );
       if (data.error && !data.success) {
         showResult(data.error + (data.crashLog ? ' (see crashLog)' : ''), false);
       } else {
@@ -206,21 +194,17 @@ export function getAdminHTML(): string {
     async function createRun() {
       const runId = 'admin-' + Date.now().toString(36);
       showResult('Creating ' + runId + '...', 'info');
-      let data = await fetchJSON('/api/runs', {
+      const data = await fetchJSON('/admin/api/create', {
         method: 'POST',
         body: JSON.stringify({ runId }),
       });
-      if (data.error && data.status === 401) {
-        showResult('Create requires runner bearer token via /api/runs; using admin bootstrap path is not available. Error: ' + data.error, false);
-        return;
-      }
       if (data.error || data.success === false) {
         showResult((data.error || 'create failed') + (data.crashLog ? ' | crashLog available in response' : ''), false);
         console.log('create response', data);
       } else {
-        showResult('Created ' + runId, true);
+        showResult('Created ' + (data.runId || runId) + (data.openCodeUrl ? ' → ' + data.openCodeUrl : ''), true);
       }
-      selectedRunId = runId;
+      selectedRunId = data.runId || runId;
       await refreshRuns();
       await refreshSelectedStatus();
     }

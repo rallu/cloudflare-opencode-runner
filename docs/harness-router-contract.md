@@ -24,11 +24,20 @@ Body (all optional):
 ```json
 {
   "runId": "linear-ENG-142-abc",
-  "repo": "owner/name",
+  "repo": "https://github.com/org/repo.git",
   "branch": "main",
-  "maxLifetimeMs": 14400000
+  "maxLifetimeMs": 14400000,
+  "setup": ["npm install"],
+  "prompt": "Implement the issue…",
+  "title": "ENG-142",
+  "model": { "providerID": "opencode", "modelID": "big-pickle" },
+  "agent": "build"
 }
 ```
+
+- `setup`: shell commands run in the first cloned repo **after clone, before** `opencode serve`. Failure fails container startup (bootstrap error).
+- `prompt`: if set, after OpenCode is ready the runner creates a session and calls `prompt_async` (default model `opencode` / `big-pickle`).
+- Port-ready wait is 300s so slow `npm install` can finish before serve starts.
 
 Response `201`:
 ```json
@@ -36,6 +45,9 @@ Response `201`:
   "runId": "...",
   "url": "https://opencode-server.rubikc.workers.dev/r/<runId>/",
   "openCodeUrl": "https://opencode-server.rubikc.workers.dev/r/<runId>/",
+  "sessionId": "ses_…",
+  "promptAccepted": true,
+  "prompt": { "ok": true, "sessionId": "ses_…", "promptAccepted": true, "directory": "/home/dev/repo" },
   "links": {
     "ui": "https://opencode-server.rubikc.workers.dev/r/<runId>/",
     "health": "https://opencode-server.rubikc.workers.dev/r/<runId>/global/health",
@@ -43,6 +55,8 @@ Response `201`:
   }
 }
 ```
+
+Container ready still returns `success: true` even if session/prompt fails; check `prompt.ok` / `prompt.error`.
 
 ### Status / destroy
 
@@ -64,7 +78,7 @@ Mirror Cursor harness templates:
    - `POST /api/runs` with stable `runId` derived from Linear issue id + attempt (idempotent reuse).
    - Pass GitHub `repo`/`branch` from template when known.
    - Comment on Linear with `openCodeUrl` (primary UX).
-   - Optionally POST initial prompt into OpenCode session API under that run URL if product wants auto-start (OpenAPI at `links.openapi`); otherwise leave human/agent to drive the UI.
+   - Prefer passing `prompt` (+ optional `setup`, `model`, `title`) on `POST /api/runs` so the runner auto-creates a session and starts the agent; otherwise leave human/agent to drive the UI (OpenAPI at `links.openapi`).
 4. **On cancel / archive / merge / failure:** `DELETE /api/runs/:runId`.
 5. **Secrets (Doppler/env):** `OPENCODE_BASE_URL`, `OPENCODE_RUNNER_API_TOKEN`, `CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`.
 
@@ -86,3 +100,10 @@ Mirror Cursor harness templates:
 2. Harness Router reads `GET /api/capabilities` (same auth as runs) for template model/agent pickers.
 3. Connection Ready: `GET /api/health` (or `/worker-health` + Access) — do not poll `POST /api/runs`.
 4. First deploy: capabilities stay empty until the first successful run (or admin refresh).
+
+
+## Browser admin (humans)
+
+- UI: `GET /admin` (Access email policy)
+- Control: `GET /admin/api/list`, `POST /admin/api/create`, `POST /admin/api/{start|stop|restart|destroy}?runId=`
+- Does **not** use `RUNNER_API_TOKEN`. Automation remains on `/api/runs*` with bearer.
