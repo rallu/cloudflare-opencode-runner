@@ -914,6 +914,106 @@ function runUrl(requestUrl: string, runId: string): string {
   return `${u.origin}/r/${encodeURIComponent(runId)}/`;
 }
 
+
+const OC_RUN_COOKIE = "oc_run";
+const OC_RUN_COOKIE_MAX_AGE = 14400; // match default 4h run TTL
+
+function parseCookies(header: string | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!header) return out;
+  for (const part of header.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx === -1) continue;
+    const k = part.slice(0, idx).trim();
+    const v = part.slice(idx + 1).trim();
+    if (k) out[k] = decodeURIComponent(v);
+  }
+  return out;
+}
+
+function ocRunCookieHeader(runId: string): string {
+  return `${OC_RUN_COOKIE}=${encodeURIComponent(runId)}; Path=/; Secure; HttpOnly; SameSite=None; Max-Age=${OC_RUN_COOKIE_MAX_AGE}`;
+}
+
+function clearOcRunCookieHeader(): string {
+  return `${OC_RUN_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=None; Max-Age=0`;
+}
+
+/** Rewrite root-absolute href/src in HTML so assets resolve under /r/:runId/. */
+function rewriteHtmlRootAbsolute(html: string, runId: string): string {
+  const prefix = `/r/${runId}`;
+  // href="/..." or src="/..." (and single-quoted) — not protocol-relative //
+  return html.replace(
+    /\b(href|src)=(["'])\/(?!\/)([^"']*)\2/gi,
+    (_m, attr: string, q: string, rest: string) => {
+      // Already under this run prefix — leave alone
+      if (rest === runId || rest.startsWith(`${runId}/`)) {
+        return `${attr}=${q}/${rest}${q}`;
+      }
+      if (rest.startsWith(`r/${runId}/`) || rest === `r/${runId}`) {
+        return `${attr}=${q}/${rest}${q}`;
+      }
+      return `${attr}=${q}${prefix}/${rest}${q}`;
+    },
+  );
+}
+
+async function proxyToRun(
+  env: Env,
+  runId: string,
+  request: Request,
+  opts?: { setStickyCookie?: boolean; rewriteHtml?: boolean },
+): Promise<Response> {
+  const url = new URL(request.url);
+  // Container expects root paths (/assets/..., /global/health, etc.)
+  const target = new URL(url.pathname + url.search, "http://container");
+  const headers = new Headers(request.headers);
+  headers.delete("host");
+
+  const container = getContainer(env.OPENCODE_CONTAINER, runId);
+  const upstream = await container.fetch(
+    new Request(target.toString(), {
+      method: request.method,
+      headers,
+      body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body,
+      redirect: "manual",
+    }),
+  );
+
+  const setCookie = opts?.setStickyCookie !== false && upstream.ok;
+  const wantRewrite =
+    (opts?.rewriteHtml !== false) &&
+    upstream.ok &&
+    (upstream.headers.get("content-type") || "").toLowerCase().includes("text/html");
+
+  if (!setCookie && !wantRewrite) {
+    return upstream;
+  }
+
+  const outHeaders = new Headers(upstream.headers);
+  if (setCookie) {
+    outHeaders.append("Set-Cookie", ocRunCookieHeader(runId));
+  }
+
+  if (wantRewrite) {
+    const html = await upstream.text();
+    const rewritten = rewriteHtmlRootAbsolute(html, runId);
+    // Body length changed
+    outHeaders.delete("content-length");
+    return new Response(rewritten, {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers: outHeaders,
+    });
+  }
+
+  return new Response(upstream.body, {
+    status: upstream.status,
+    statusText: upstream.statusText,
+    headers: outHeaders,
+  });
+}
+
 function requireRunnerAuth(c: { req: { header: (n: string) => string | undefined }; env: Env }): boolean {
   const token = c.env.RUNNER_API_TOKEN;
   if (!token) {
@@ -1082,9 +1182,14 @@ app.delete("/api/runs/:runId", async (c) => {
   );
   const payload = (await destroyResp.json().catch(() => ({}))) as Record<string, unknown>;
   await registryRemove(c.env, runId);
+  const headers = new Headers({ "Content-Type": "application/json" });
+  const cookies = parseCookies(c.req.header("Cookie"));
+  if (cookies[OC_RUN_COOKIE] === runId) {
+    headers.append("Set-Cookie", clearOcRunCookieHeader());
+  }
   return new Response(JSON.stringify({ runId, ...payload }), {
     status: destroyResp.status,
-    headers: { "Content-Type": "application/json" },
+    headers,
   });
 });
 
@@ -1099,19 +1204,15 @@ app.all("/r/:runId/*", async (c) => {
   if (!path.startsWith("/")) path = `/${path}`;
   if (path === "/") path = "/";
 
-  const target = new URL(path + url.search, "http://container");
-  const headers = new Headers(c.req.raw.headers);
-  headers.delete("host");
+  // Rebuild request with container-root path (strip /r/:runId)
+  const stripped = new Request(new URL(path + url.search, url.origin).toString(), {
+    method: c.req.method,
+    headers: c.req.raw.headers,
+    body: c.req.method === "GET" || c.req.method === "HEAD" ? undefined : c.req.raw.body,
+    redirect: "manual",
+  });
 
-  const container = getContainer(c.env.OPENCODE_CONTAINER, runId);
-  return container.fetch(
-    new Request(target.toString(), {
-      method: c.req.method,
-      headers,
-      body: c.req.method === "GET" || c.req.method === "HEAD" ? undefined : c.req.raw.body,
-      redirect: "manual",
-    }),
-  );
+  return proxyToRun(c.env, runId, stripped, { setStickyCookie: true, rewriteHtml: true });
 });
 
 // Convenience: /r/:runId → /r/:runId/
@@ -1147,8 +1248,34 @@ app.all("/admin/api/:action", async (c) => {
   }
 });
 
-// No shared catch-all instance: automation must use /api/runs + /r/:runId
-app.all("*", (c) => {
+/**
+ * Sticky fallthrough: OpenCode UI loads /assets/*, /site.webmanifest, /session, etc.
+ * at host root. If oc_run cookie is set, proxy those to the run container unchanged.
+ * Reserved prefixes (/api, /admin, /r, /worker-health) are never fallthrough targets
+ * here because they already have routes; this catch-all only sees unmatched paths.
+ */
+app.all("*", async (c) => {
+  const path = new URL(c.req.url).pathname;
+  const reserved =
+    path.startsWith("/api/") ||
+    path === "/api" ||
+    path.startsWith("/admin") ||
+    path.startsWith("/r/") ||
+    path === "/r" ||
+    path === "/worker-health" ||
+    path.startsWith("/worker-health/");
+
+  if (!reserved) {
+    const cookies = parseCookies(c.req.header("Cookie"));
+    const sticky = sanitizeRunId(cookies[OC_RUN_COOKIE] || "");
+    if (sticky) {
+      return proxyToRun(c.env, sticky, c.req.raw, {
+        setStickyCookie: true,
+        rewriteHtml: true,
+      });
+    }
+  }
+
   return c.json(
     {
       error: "Use per-run URLs",
