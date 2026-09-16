@@ -46,4 +46,5 @@ new_sqlite_classes = ["RunsRegistry"]
 
 [vars]
 GIT_REPOS = ""
+# Soft lifetime (stop/sleep on alarm). Destroy only via DELETE unless hardDestroyOnExpiry.
 MAX_RUN_LIFETIME_MS = "14400000"

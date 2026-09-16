@@ -1,0 +1,27 @@
+# Toolchain pins for the OpenCode Cloudflare coding image.
+# Installed system-wide via mise into /opt/mise during Docker build.
+# Bump versions deliberately; rebuild + redeploy after changes.
+
+[tools]
+# Node LTS (even-numbered) + Bun; corepack enables pnpm/yarn in Dockerfile
+node = "24.21.0"
+bun = "1.4.2"
+
+# Python + uv
+python = "3.12.14"
+uv = "0.12.15"
+
+# Systems languages (Rust installed via rustup into /opt/rust in Dockerfile — not mise,
+# because mise+rustup defaults to /root/.cargo which breaks the non-root `dev` user.)
+go = "1.24.13"
+
+# JVM (Temurin 21 LTS) + build tools
+java = "temurin-21.0.12+101.0.LTS"
+maven = "3.9.16"
+gradle = "8.14.3"
+
+# GitHub CLI
+gh = "2.101.0"
+
+[settings]
+experimental = true

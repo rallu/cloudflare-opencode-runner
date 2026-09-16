@@ -13,7 +13,7 @@ interface Env {
   GIT_TOKEN?: string;
   /** Optional bearer token for /api/runs (in addition to Cloudflare Access) */
   RUNNER_API_TOKEN?: string;
-  /** Max lifetime before hard destroy (ms). Default 4h. */
+  /** Soft max lifetime before stop/sleep (ms). Default 4h. Destroy only via DELETE unless hardDestroyOnExpiry. */
   MAX_RUN_LIFETIME_MS?: string;
 }
 
@@ -24,7 +24,13 @@ type RunMeta = {
   /** Post-clone shell commands (first repo). Also passed as SETUP_COMMANDS env. */
   setup?: string[];
   createdAt: number;
+  /** Soft lifetime: on alarm, stop/sleep by default (not destroy). */
   expiresAt: number;
+  /**
+   * If true, TTL alarm calls destroy() instead of stop().
+   * Default false — harness must DELETE /api/runs/:id on merge/cancel.
+   */
+  hardDestroyOnExpiry?: boolean;
   status: "starting" | "ready" | "error" | "stopped" | "destroyed";
   error?: string;
   /** Auto-prompt session created after bootstrap (if prompt was requested). */
@@ -362,8 +368,8 @@ export type PromptResult = {
 
 export class OpenCodeRunner extends Container<Env> {
   defaultPort = 4096;
-  // Idle sleep; hard TTL is enforced via DO alarm (~4h)
-  sleepAfter = "4h";
+  // Idle → sleep/stop (keep DO / run id). Destroy only via DELETE (or hardDestroyOnExpiry).
+  sleepAfter = "30m";
   enableInternet = true;
   // Required: empty entrypoint from the Containers runtime would clear the image ENTRYPOINT
   // and the instance exits immediately with "container just exited".
@@ -392,8 +398,8 @@ export class OpenCodeRunner extends Container<Env> {
       GIT_TOKEN: this.env.GIT_TOKEN || "",
       RUN_ID: meta?.runId || "",
       RUN_BRANCH: branch || "",
-      // Newline-separated; startup.sh also accepts ||| separators.
-      SETUP_COMMANDS: setupCmds.join("\n"),
+      // Prefer ||| — container env may not preserve newlines. startup.sh splits on ||| and newlines.
+      SETUP_COMMANDS: setupCmds.join("|||"),
     };
   }
 
@@ -409,33 +415,59 @@ export class OpenCodeRunner extends Container<Env> {
 
   /**
    * Container SDK uses alarms for activity timeout / sleepAfter.
-   * Only hard-destroy when our per-run TTL has elapsed; otherwise defer to super.
+   * Soft TTL (expiresAt / maxLifetimeMs): stop/sleep and keep DO meta so /start works.
+   * Hard destroy on TTL only when hardDestroyOnExpiry was set at bootstrap.
+   * Explicit destroy remains DELETE /api/runs/:id (and admin destroy).
    */
   override async alarm(alarmProps?: { isRetry?: boolean; retryCount?: number }): Promise<void> {
     const meta = await this.loadMeta();
     const now = Date.now();
     if (meta?.expiresAt && now >= meta.expiresAt) {
-      console.log("Run lifetime TTL alarm fired", meta.runId);
-      try {
-        await this.destroy();
-      } catch (e) {
-        console.error("Alarm destroy failed", e);
+      const hard = meta.hardDestroyOnExpiry === true;
+      console.log(
+        hard ? "Run lifetime TTL alarm → hard destroy" : "Run lifetime TTL alarm → soft stop/sleep",
+        meta.runId,
+      );
+      if (hard) {
         try {
-          await this.stop();
-        } catch {
-          /* ignore */
+          await this.destroy();
+        } catch (e) {
+          console.error("Alarm destroy failed", e);
+          try {
+            await this.stop();
+          } catch {
+            /* ignore */
+          }
         }
+        meta.status = "destroyed";
+        await this.saveMeta(meta);
+        await registryUpsert(this.env, {
+          runId: meta.runId,
+          status: "destroyed",
+          createdAt: meta.createdAt,
+          expiresAt: meta.expiresAt,
+          repo: meta.repo,
+          branch: meta.branch,
+        });
+        return;
       }
-      meta.status = "destroyed";
+
+      try {
+        await this.stop();
+      } catch (e) {
+        console.error("Alarm soft-stop failed", e);
+      }
+      meta.status = "stopped";
       await this.saveMeta(meta);
       await registryUpsert(this.env, {
         runId: meta.runId,
-        status: "destroyed",
+        status: "stopped",
         createdAt: meta.createdAt,
         expiresAt: meta.expiresAt,
         repo: meta.repo,
         branch: meta.branch,
       });
+      // Do not delete alarm storage meta — /start can wake the same run id.
       return;
     }
     // Important: do not swallow Container SDK sleep/activity alarms.
@@ -692,7 +724,10 @@ export class OpenCodeRunner extends Container<Env> {
       runId?: string;
       repo?: string;
       branch?: string;
+      /** Soft lifetime for stop/sleep (not destroy) unless hardDestroyOnExpiry. */
       maxLifetimeMs?: number;
+      /** If true, TTL alarm destroys instead of stop/sleep. Default false. */
+      hardDestroyOnExpiry?: boolean;
       prompt?: string;
       title?: string;
       model?: { providerID: string; modelID: string };
@@ -721,6 +756,7 @@ export class OpenCodeRunner extends Container<Env> {
       setup,
       createdAt,
       expiresAt,
+      hardDestroyOnExpiry: body.hardDestroyOnExpiry === true,
       status: "starting",
     };
     await this.saveMeta(meta);
@@ -1053,6 +1089,8 @@ export class OpenCodeRunner extends Container<Env> {
         sleepAfter: this.sleepAfter,
         enableInternet: this.enableInternet,
         maxLifetimeMs: Number(this.env.MAX_RUN_LIFETIME_MS || FOUR_HOURS_MS),
+        softExpiryPolicy: "stop",
+        destroyPolicy: "explicit-delete-or-hardDestroyOnExpiry",
       },
       run: meta,
     });
@@ -1366,6 +1404,8 @@ app.get("/worker-health", (c) => {
     mode: "per-run",
     maxInstances: 4,
     maxLifetimeMs: Number(c.env.MAX_RUN_LIFETIME_MS || FOUR_HOURS_MS),
+    sleepAfter: "30m",
+    destroyPolicy: "explicit-delete",
     timestamp: new Date().toISOString(),
   });
 });
@@ -1439,7 +1479,10 @@ export type CreateRunBody = {
   runId?: string;
   repo?: string;
   branch?: string;
+  /** Soft lifetime (stop/sleep on expiry). Default 4h. */
   maxLifetimeMs?: number;
+  /** If true, TTL destroys the run. Default false — use DELETE to destroy. */
+  hardDestroyOnExpiry?: boolean;
   prompt?: string;
   title?: string;
   model?: { providerID: string; modelID: string };
@@ -1466,6 +1509,7 @@ async function createRunResponse(
         repo: body.repo,
         branch: body.branch,
         maxLifetimeMs: body.maxLifetimeMs,
+        hardDestroyOnExpiry: body.hardDestroyOnExpiry,
         prompt: body.prompt,
         title: body.title,
         model: body.model,

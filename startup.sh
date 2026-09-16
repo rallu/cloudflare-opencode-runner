@@ -1,5 +1,7 @@
 #!/bin/bash
 cd /home/dev
+# Curated image toolchains (mise shims). bash -lc for SETUP_COMMANDS must see these.
+export PATH="/opt/mise/shims:/opt/rust/cargo/bin:/home/dev/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 mkdir -p /tmp
 : > /tmp/opencode.log
 echo "startup.sh begin $(date -Iseconds 2>/dev/null || date) run=${RUN_ID:-none}" >> /tmp/opencode.log
@@ -53,8 +55,8 @@ if [ -n "$SETUP_COMMANDS" ]; then
     # trim leading/trailing whitespace
     _cmd="$(printf '%s' "$_cmd" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
     [ -z "$_cmd" ] && continue
-    echo "+ bash -lc: $_cmd" >> /tmp/opencode.log
-    if ! bash -lc "$_cmd" >> /tmp/opencode.log 2>&1; then
+    echo "+ bash -c: $_cmd" >> /tmp/opencode.log
+    if ! bash -c "$_cmd" >> /tmp/opencode.log 2>&1; then
       _ec=$?
       echo "SETUP_COMMAND failed (exit $_ec): $_cmd" >> /tmp/opencode.log
       echo "SETUP_COMMAND failed (exit $_ec): $_cmd" >&2

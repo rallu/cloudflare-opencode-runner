@@ -2,7 +2,7 @@
 
 **Per-run OpenCode servers on Cloudflare Containers**, built for [Harness Router](https://harness-router.dugongi.com/) by [Dugongi](https://dugongi.com/).
 
-When Harness Router delegates a Linear issue to OpenCode, this Worker spins up an **isolated container** for that run, clones the repo, exposes an OpenCode UI link, and destroys the instance on cancel, archive, merge, or after a max lifetime (default **4 hours**).
+When Harness Router delegates a Linear issue to OpenCode, this Worker spins up an **isolated container** for that run, clones the repo, and exposes an OpenCode UI link. Idle containers **sleep** after **30 minutes**; soft max lifetime (default **4 hours**) **stops** the container but keeps the run id so it can be started again. **Destroy only** on explicit `DELETE /api/runs/:id` (harness cancel/archive/merge) or admin destroy — not on the default TTL alarm.
 
 > Not affiliated with the separate open-source project at [`HarnessRouter/harnessrouter`](https://github.com/HarnessRouter/harnessrouter). This repo is the OpenCode runner for **Harness Router** by Dugongi.
 
@@ -11,8 +11,11 @@ When Harness Router delegates a Linear issue to OpenCode, this Worker spins up a
 - **One container per run** — Durable Object keyed by `runId`
 - **UI link for humans** — `https://<worker>/r/<runId>/…/session/…` when auto-prompted (else `/r/<runId>/`; Access-protected)
 - **Automation API** — `POST /api/runs` returns `openCodeUrl` for Linear comments
-- **Low concurrency** — default `max_instances = 4`
-- **Hard TTL** — DO alarm destroys the instance after 4 hours
+- **Low concurrency** — default `max_instances = 8` (see `wrangler.toml`)
+- **Idle sleep** — `sleepAfter = 30m` (container stops; DO / run id retained; `POST …/start` wakes it)
+- **Soft lifetime** — `maxLifetimeMs` / `MAX_RUN_LIFETIME_MS` (default 4h) stops the run on alarm; set `hardDestroyOnExpiry: true` only if you want TTL to destroy
+- **Destroy** — `DELETE /api/runs/:id` (or admin destroy); harness must DELETE on merge/cancel
+- **Curated Ubuntu coding image** — `ubuntu:24.04` (linux/amd64) with Node, Python/uv, Go, Rust, Java 21, gh, ripgrep, and more (see below)
 - **No OpenCode basic auth** — use Cloudflare Access for browsers; Access service token + optional `RUNNER_API_TOKEN` for harness-router
 
 ## Architecture
@@ -88,21 +91,51 @@ Optional fields:
 
 Response includes `openCodeUrl` / `url` — when a prompt auto-starts a session this is a **session deep link** (`/r/<runId>/<cn(dir)>/session/<sessionId>`); otherwise `/r/<runId>/`. Opening either shows the chat (document entry 302s to the session when meta has `sessionId`+`directory`). Put that link in Linear.
 
-### Status / destroy
+### Status / lifecycle
 
 - `GET /api/runs/:runId`
-- `DELETE /api/runs/:runId` — call on Linear cancel/archive or after GitHub merge
+- `POST /api/runs/:runId/start` — wake a stopped/slept run
+- `POST /api/runs/:runId/stop` — sleep/stop (keep run id)
+- `DELETE /api/runs/:runId` — **only** hard destroy; call on Linear cancel/archive or after GitHub merge
+- Idle inactivity uses `sleepAfter=30m`. Soft `maxLifetimeMs` stops the container; it does **not** destroy unless `hardDestroyOnExpiry: true`.
 
 ### OpenCode session API
 
 Drive OpenCode under `/r/:runId/` (see OpenCode `/doc`), e.g. `POST /r/:runId/session`, `POST /r/:runId/session/:id/prompt_async`, SSE `GET /r/:runId/event`. With sticky `oc_run` cookie (after opening the UI once), root `/session/...` also proxies to the run.
 
+
+## Container image (coding base)
+
+`Dockerfile` is based on **`ubuntu:24.04`** (`linux/amd64`), not Alpine and not `cloudflare/sandbox` (wrong ENTRYPOINT).
+
+**apt:** bash, zsh, git, git-lfs, curl, wget, jq, unzip/zip/tar, openssh-client, ca-certificates, build-essential, pkg-config, make, cmake, sqlite3, ripgrep, fd (`fdfind` → `fd`), fzf, tini
+
+**Toolchains** (pinned in `mise.toml`, installed with [mise](https://mise.jdx.dev/) into `/opt/mise`):
+
+| Tool | Pin (see `mise.toml`) |
+|------|------------------------|
+| Node (LTS) + corepack (pnpm/yarn) | 24.x |
+| Bun | pinned |
+| Python 3 + pip + uv | 3.12 + uv |
+| Go | 1.24.x |
+| Rust / cargo | 1.89.0 via rustup in `/opt/rust` (not mise) |
+| Java (Temurin) + Maven + Gradle | 21 + Maven/Gradle |
+| GitHub CLI `gh` | pinned |
+| `opencode-ai` | pinned in Dockerfile `ARG OPENCODE_VERSION` |
+
+Non-root user `dev`, `EXPOSE 4096`, `ENTRYPOINT ["/bin/bash", "/home/dev/startup.sh"]` (unchanged). Aim ≤2GB compressed / ≤5GB unpacked; Cloudflare **standard-2** has 12GB disk — leave headroom for clones. If the image build exceeds size/time limits, drop Java/Gradle first.
+
+Always build with `--platform=linux/amd64` (Wrangler/Containers does this for the configured Dockerfile).
+
 ## Configuration
 
 | Setting | Where | Default |
 |--------|--------|---------|
-| `max_instances` | `wrangler.toml` | `4` |
-| `MAX_RUN_LIFETIME_MS` | `wrangler.toml` `[vars]` | `14400000` (4h) |
+| `max_instances` | `wrangler.toml` | `8` |
+| `instance_type` | `wrangler.toml` | `standard-2` (12GB disk) |
+| `sleepAfter` | `OpenCodeRunner` in `src/index.ts` | `30m` (idle → sleep) |
+| `MAX_RUN_LIFETIME_MS` | `wrangler.toml` `[vars]` | `14400000` (4h **soft** stop) |
+| `hardDestroyOnExpiry` | `POST /api/runs` body | `false` (TTL does not destroy) |
 | `OPENCODE_API_KEY` | secret | required |
 | `GIT_TOKEN` | secret | optional |
 | `RUNNER_API_TOKEN` | secret | optional (if unset, rely on Access alone) |

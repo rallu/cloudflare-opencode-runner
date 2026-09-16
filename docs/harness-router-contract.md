@@ -5,7 +5,7 @@
 ## Backend (already live)
 
 - Base: `https://opencode-server.rubikc.workers.dev`
-- Mode: one Cloudflare Container per run (`max_instances=4`, ~4h lifetime)
+- Mode: one Cloudflare Container per run (`max_instances=8`, idle sleep 30m, soft ~4h stop; destroy via DELETE)
 - Front door: Cloudflare Access (human browser login for UI)
 - Automation API: `/api/runs*` (optional `Authorization: Bearer $RUNNER_API_TOKEN` if secret set)
 
@@ -27,6 +27,7 @@ Body (all optional):
   "repo": "https://github.com/org/repo.git",
   "branch": "main",
   "maxLifetimeMs": 14400000,
+  "hardDestroyOnExpiry": false,
   "setup": ["npm install"],
   "prompt": "Implement the issue…",
   "title": "ENG-142",
@@ -37,6 +38,9 @@ Body (all optional):
 
 - `setup`: shell commands run in the first cloned repo **after clone, before** `opencode serve`. Failure fails container startup (bootstrap error).
 - `prompt`: if set, after OpenCode is ready the runner creates a session and calls `prompt_async` (default model `opencode` / `big-pickle`).
+- `maxLifetimeMs`: soft lifetime — on expiry the runner **stops/sleeps** (keeps run id / DO). Does **not** destroy by default.
+- `hardDestroyOnExpiry`: optional; if `true`, TTL alarm calls destroy. Prefer leaving false and `DELETE` on merge.
+- Idle: container `sleepAfter=30m`.
 - Port-ready wait is 300s so slow `npm install` can finish before serve starts.
 
 Response `201`:
@@ -60,10 +64,12 @@ When `sessionId` + `directory` are present, `openCodeUrl` / `url` / `links.ui` a
 
 Container ready still returns `success: true` even if session/prompt fails; check `prompt.ok` / `prompt.error`.
 
-### Status / destroy
+### Status / lifecycle
 
 - `GET /api/runs/:runId` → status + `openCodeUrl`
-- `DELETE /api/runs/:runId` → destroy container
+- `POST /api/runs/:runId/start` → wake stopped/slept run
+- `POST /api/runs/:runId/stop` → sleep/stop (retain run id)
+- `DELETE /api/runs/:runId` → **destroy** container (required on cancel/archive/merge)
 
 ### Human UI
 
@@ -81,7 +87,7 @@ Mirror Cursor harness templates:
    - Pass GitHub `repo`/`branch` from template when known.
    - Comment on Linear with `openCodeUrl` (primary UX).
    - Prefer passing `prompt` (+ optional `setup`, `model`, `title`) on `POST /api/runs` so the runner auto-creates a session and starts the agent; otherwise leave human/agent to drive the UI (OpenAPI at `links.openapi`).
-4. **On cancel / archive / merge / failure:** `DELETE /api/runs/:runId`.
+4. **On cancel / archive / merge / failure:** `DELETE /api/runs/:runId` (required — TTL no longer auto-destroys by default).
 5. **Secrets (Doppler/env):** `OPENCODE_BASE_URL`, `OPENCODE_RUNNER_API_TOKEN`, `CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`.
 
 ## Cloudflare Access setup (dashboard — API token lacked Access create)
