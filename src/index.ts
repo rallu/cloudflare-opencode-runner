@@ -1103,20 +1103,140 @@ function clearOcRunCookieHeader(): string {
   return `${OC_RUN_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=None; Max-Age=0`;
 }
 
-/** Strip PWA manifest from proxied HTML.
- * Browsers fetch manifests without cookies, so Cloudflare Access redirects to the
- * login host and CSP blocks it. Asset href/src stay root-absolute (/assets/...) —
- * the sticky oc_run cookie routes them to the container.
+/** Build CSP-safe router shim served from the Worker (not the container).
+ * OpenCode's Solid router reads location.pathname and pushState('/') — without a
+ * base-path flag we strip /r/:runId for the app and re-prefix history writes.
  */
-function prepareProxiedHtml(html: string): string {
-  return html.replace(/<link\b[^>]*\brel=(["'])manifest\1[^>]*>\s*/gi, "");
+function ocShimScript(runId: string): string {
+  // runId already sanitized ([A-Za-z0-9_-]); still JSON-encode for JS string safety.
+  const idLit = JSON.stringify(runId);
+  return `(() => {
+  const RUN = ${idLit};
+  const PREFIX = "/r/" + RUN;
+  function stripPath(p) {
+    if (typeof p !== "string") return p;
+    if (p === PREFIX || p === PREFIX + "/") return "/";
+    if (p.startsWith(PREFIX + "/")) return p.slice(PREFIX.length) || "/";
+    return p;
+  }
+  function prefixPath(url, title, unused) {
+    // history.*(state, title, url) — only rewrite same-origin path URLs
+    if (typeof url !== "string") return [url, title, unused];
+    try {
+      const u = new URL(url, location.href);
+      if (u.origin !== location.origin) return [url, title, unused];
+      let path = u.pathname;
+      if (path === PREFIX || path.startsWith(PREFIX + "/")) {
+        return [url, title, unused];
+      }
+      if (!path.startsWith("/")) return [url, title, unused];
+      const next = PREFIX + (path === "/" ? "/" : path) + u.search + u.hash;
+      return [next, title, unused];
+    } catch {
+      return [url, title, unused];
+    }
+  }
+  window.__ocStripPath = stripPath;
+  const _push = history.pushState.bind(history);
+  const _replace = history.replaceState.bind(history);
+  history.pushState = function (state, title, url) {
+    const a = prefixPath(url, title, state);
+    // prefixPath returns [url, title, unused] — restore (state, title, url) order
+    return _push(state, title, a[0]);
+  };
+  history.replaceState = function (state, title, url) {
+    const a = prefixPath(url, title, state);
+    return _replace(state, title, a[0]);
+  };
+  try {
+    const desc = Object.getOwnPropertyDescriptor(Location.prototype, "pathname");
+    if (desc && desc.get && desc.configurable) {
+      Object.defineProperty(Location.prototype, "pathname", {
+        configurable: true,
+        enumerable: desc.enumerable,
+        get: function () {
+          return stripPath(desc.get.call(this));
+        },
+      });
+    }
+  } catch (_) {}
+})();
+`;
+}
+
+function ocShimResponse(runId: string): Response {
+  return new Response(ocShimScript(runId), {
+    status: 200,
+    headers: {
+      "Content-Type": "application/javascript; charset=utf-8",
+      "Cache-Control": "no-store",
+      "Set-Cookie": ocRunCookieHeader(runId),
+    },
+  });
+}
+
+/**
+ * Prepare OpenCode SPA HTML for serving under /r/:runId/.
+ * - Strip PWA manifest (Access breaks cookieless manifest fetches)
+ * - Rewrite root-absolute href/src to /r/:runId/... (skip protocol-relative //)
+ * - Inject external router shim early in <head> (CSP-safe; no inline script)
+ */
+function prepareProxiedHtml(html: string, runId: string): string {
+  const prefix = `/r/${runId}`;
+  let out = html.replace(/<link\b[^>]*\brel=(["'])manifest\1[^>]*>\s*/gi, "");
+
+  out = out.replace(
+    /\b(href|src)=(["'])\/(?!\/)([^"']*)\2/gi,
+    (_m, attr: string, q: string, rest: string) => {
+      // rest is path after leading /; skip if already under this run prefix
+      if (
+        rest === `r/${runId}` ||
+        rest.startsWith(`r/${runId}/`) ||
+        rest.startsWith(`r/${runId}?`) ||
+        rest.startsWith(`r/${runId}#`)
+      ) {
+        return `${attr}=${q}/${rest}${q}`;
+      }
+      return `${attr}=${q}${prefix}/${rest}${q}`;
+    },
+  );
+
+  // Avoid double-prefix if rewrite matched paths that already had /r/runId
+  out = out.replaceAll(`${prefix}${prefix}/`, `${prefix}/`);
+
+  const shimTag = `<script src="${prefix}/__oc-shim.js"></script>`;
+  if (out.includes(`${prefix}/__oc-shim.js`)) {
+    return out;
+  }
+  if (/<head[^>]*>/i.test(out)) {
+    out = out.replace(/<head([^>]*)>/i, `<head$1>${shimTag}`);
+  } else {
+    out = shimTag + out;
+  }
+  return out;
+}
+
+/** Rewrite location.pathname reads in OpenCode JS bundles to use the strip helper. */
+function rewriteProxiedJs(js: string): string {
+  let out = js;
+  // window.location.pathname → window.__ocStripPath(window.location.pathname)
+  out = out.replace(
+    /(?<!__ocStripPath\()window\.location\.pathname\b/g,
+    "window.__ocStripPath(window.location.pathname)",
+  );
+  // location.pathname → window.__ocStripPath(location.pathname) (skip window. and already wrapped)
+  out = out.replace(
+    /(?<!__ocStripPath\()(?<!window\.)location\.pathname\b/g,
+    "window.__ocStripPath(location.pathname)",
+  );
+  return out;
 }
 
 async function proxyToRun(
   env: Env,
   runId: string,
   request: Request,
-  opts?: { setStickyCookie?: boolean; rewriteHtml?: boolean },
+  opts?: { setStickyCookie?: boolean; rewriteHtml?: boolean; rewriteJs?: boolean },
 ): Promise<Response> {
   const url = new URL(request.url);
   // Container expects root paths (/assets/..., /global/health, etc.)
@@ -1134,13 +1254,20 @@ async function proxyToRun(
     }),
   );
 
+  const ct = (upstream.headers.get("content-type") || "").toLowerCase();
   const setCookie = opts?.setStickyCookie !== false && upstream.ok;
-  const wantRewrite =
+  const wantHtml =
     (opts?.rewriteHtml !== false) &&
     upstream.ok &&
-    (upstream.headers.get("content-type") || "").toLowerCase().includes("text/html");
+    ct.includes("text/html");
+  const pathEndsJs = url.pathname.endsWith(".js");
+  const wantJs =
+    (opts?.rewriteJs === true || (opts?.rewriteJs !== false && pathEndsJs)) &&
+    upstream.ok &&
+    (ct.includes("javascript") || ct.includes("ecmascript") || pathEndsJs) &&
+    !wantHtml;
 
-  if (!setCookie && !wantRewrite) {
+  if (!setCookie && !wantHtml && !wantJs) {
     return upstream;
   }
 
@@ -1149,10 +1276,20 @@ async function proxyToRun(
     outHeaders.append("Set-Cookie", ocRunCookieHeader(runId));
   }
 
-  if (wantRewrite) {
+  if (wantHtml) {
     const html = await upstream.text();
-    const prepared = prepareProxiedHtml(html);
-    // Body length changed
+    const prepared = prepareProxiedHtml(html, runId);
+    outHeaders.delete("content-length");
+    return new Response(prepared, {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers: outHeaders,
+    });
+  }
+
+  if (wantJs) {
+    const js = await upstream.text();
+    const prepared = rewriteProxiedJs(js);
     outHeaders.delete("content-length");
     return new Response(prepared, {
       status: upstream.status,
@@ -1397,31 +1534,48 @@ app.delete("/api/runs/:runId", async (c) => {
 });
 
 /**
- * Document entry for a run: 302 → / with sticky oc_run cookie.
- * OpenCode's SolidJS router uses window.location.pathname; serving the SPA under
- * /r/:runId/ leaves <main> empty. CSP also blocks inline URL-normalization scripts.
- * Linear/harness links stay /r/:runId/ (one redirect).
+ * Document entry for a run: proxy OpenCode HTML under /r/:runId/ (no 302 to /).
+ * Router shim + HTML/JS rewrites keep SolidJS happy without --base-path.
  */
-function redirectRunDocumentToRoot(runId: string): Response {
-  return new Response(null, {
-    status: 302,
-    headers: {
-      Location: "/",
-      "Set-Cookie": ocRunCookieHeader(runId),
-    },
+async function proxyRunDocument(env: Env, runId: string, request: Request): Promise<Response> {
+  const url = new URL(request.url);
+  const stripped = new Request(new URL("/" + url.search, url.origin).toString(), {
+    method: request.method,
+    headers: request.headers,
+    body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body,
+    redirect: "manual",
+  });
+  return proxyToRun(env, runId, stripped, {
+    setStickyCookie: true,
+    rewriteHtml: true,
+    rewriteJs: false,
   });
 }
+
+app.get("/r/:runId/__oc-shim.js", async (c) => {
+  const runId = sanitizeRunId(c.req.param("runId"));
+  if (!runId) return c.text("Invalid run id", 400);
+  return ocShimResponse(runId);
+});
 
 app.get("/r/:runId/", async (c) => {
   const runId = sanitizeRunId(c.req.param("runId"));
   if (!runId) return c.text("Invalid run id", 400);
-  return redirectRunDocumentToRoot(runId);
+  return proxyRunDocument(c.env, runId, c.req.raw);
 });
 
 app.get("/r/:runId", async (c) => {
   const runId = sanitizeRunId(c.req.param("runId"));
   if (!runId) return c.text("Invalid run id", 400);
-  return redirectRunDocumentToRoot(runId);
+  // Keep trailing slash URL as canonical for assets/relative resolution
+  const dest = `/r/${runId}/`;
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: dest,
+      "Set-Cookie": ocRunCookieHeader(runId),
+    },
+  });
 });
 
 // Per-run proxy for assets/API/deep paths: /r/:runId/assets/..., /r/:runId/global/..., etc.
@@ -1434,12 +1588,17 @@ app.all("/r/:runId/*", async (c) => {
   let path = url.pathname.slice(prefix.length);
   if (!path.startsWith("/")) path = `/${path}`;
 
-  // Document root under /r/:runId/ — same 302 as dedicated routes (belt-and-suspenders for routers)
+  // Worker-served shim (also matched by /* if dedicated route order differs)
+  if (path === "/__oc-shim.js") {
+    return ocShimResponse(runId);
+  }
+
+  // Document root under /r/:runId/ — proxy SPA HTML (do NOT 302 to domain root)
   if (
     (c.req.method === "GET" || c.req.method === "HEAD") &&
     (path === "/" || path === "")
   ) {
-    return redirectRunDocumentToRoot(runId);
+    return proxyRunDocument(c.env, runId, c.req.raw);
   }
 
   // Rebuild request with container-root path (strip /r/:runId)
@@ -1450,9 +1609,11 @@ app.all("/r/:runId/*", async (c) => {
     redirect: "manual",
   });
 
-  // HTML under /r/... is uncommon after the document 302; still strip manifest only.
-  // Do not rewrite asset URLs to /r/... — sticky cookie serves /assets at host root.
-  return proxyToRun(c.env, runId, stripped, { setStickyCookie: true, rewriteHtml: true });
+  return proxyToRun(c.env, runId, stripped, {
+    setStickyCookie: true,
+    rewriteHtml: true,
+    rewriteJs: path.endsWith(".js"),
+  });
 });
 
 app.use("/admin/*", cors());
