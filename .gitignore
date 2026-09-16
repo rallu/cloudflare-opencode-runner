@@ -1,0 +1,10 @@
+node_modules/
+.wrangler/
+.dev.vars
+.runner-api-token
+.generated-server-password
+.deploy-last-*
+*.log
+*.pem
+.DS_Store
+dist/

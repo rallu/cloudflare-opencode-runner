@@ -1,0 +1,34 @@
+{
+  "name": "harness-router-opencode",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "types": "wrangler types"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "latest",
+    "hono": "^4.11.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250109.0",
+    "typescript": "^5.7.0",
+    "wrangler": "^4.132.0"
+  },
+  "description": "Harness Router OpenCode runner on Cloudflare Containers \u2014 one isolated OpenCode instance per Linear/harness run.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rallu/harness-router-opencode.git"
+  },
+  "keywords": [
+    "harness-router",
+    "opencode",
+    "cloudflare",
+    "containers",
+    "linear",
+    "agents"
+  ]
+}

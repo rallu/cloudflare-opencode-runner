@@ -1,0 +1,22 @@
+name = "harness-router-opencode"
+main = "src/index.ts"
+compatibility_date = "2025-01-14"
+
+[[containers]]
+class_name = "OpenCodeContainer"
+image = "./Dockerfile"
+max_instances = 4
+instance_type = "standard-2"
+
+[[durable_objects.bindings]]
+name = "OPENCODE_CONTAINER"
+class_name = "OpenCodeContainer"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["OpenCodeContainer"]
+
+[vars]
+# Global defaults; per-run GIT_REPOS override these via the runs API
+GIT_REPOS = ""
+MAX_RUN_LIFETIME_MS = "14400000"
