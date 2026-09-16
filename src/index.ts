@@ -54,6 +54,10 @@ const START_WAIT = {
   instanceGetTimeoutMS: 60_000,
 } as const;
 
+const CONTAINER_START = {
+  entrypoint: ["/home/dev/startup.sh"],
+} as const;
+
 const CAPABILITIES_KEY = "capabilities";
 
 function json(data: unknown, status = 200): Response {
@@ -177,6 +181,9 @@ export class OpenCodeContainer extends Container<Env> {
   // Idle sleep; hard TTL is enforced via DO alarm (~4h)
   sleepAfter = "4h";
   enableInternet = true;
+  // Required: empty entrypoint from the Containers runtime would clear the image ENTRYPOINT
+  // and the instance exits immediately with "container just exited".
+  entrypoint = ["/home/dev/startup.sh"];
 
   private startTime: number | null = null;
 
@@ -344,6 +351,7 @@ export class OpenCodeContainer extends Container<Env> {
     await this.startAndWaitForPorts({
       ports: [this.defaultPort],
       cancellationOptions: { ...START_WAIT },
+      startOptions: { ...CONTAINER_START },
     });
     const capabilities = await this.collectAndStoreCapabilities(meta.runId);
     return json({ success: true, capabilities });
@@ -432,6 +440,7 @@ export class OpenCodeContainer extends Container<Env> {
     await this.startAndWaitForPorts({
       ports: [this.defaultPort],
       cancellationOptions: { ...START_WAIT },
+      startOptions: { ...CONTAINER_START },
     });
     if (meta) {
       meta.status = "ready";
@@ -471,6 +480,7 @@ export class OpenCodeContainer extends Container<Env> {
     await this.startAndWaitForPorts({
       ports: [this.defaultPort],
       cancellationOptions: { ...START_WAIT },
+      startOptions: { ...CONTAINER_START },
     });
     return json({ success: true, message: "Container restarted successfully" });
   }
