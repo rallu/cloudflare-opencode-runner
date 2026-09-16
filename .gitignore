@@ -8,3 +8,4 @@ node_modules/
 *.pem
 .DS_Store
 dist/
+src/index.ts.bak
