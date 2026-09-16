@@ -5,8 +5,9 @@ import { cors } from "hono/cors";
 import { getAdminHTML } from "./admin-ui";
 
 interface Env {
-  OPENCODE_CONTAINER: DurableObjectNamespace<OpenCodeContainer>;
+  OPENCODE_CONTAINER: DurableObjectNamespace<OpenCodeRunner>;
   CAPABILITIES: DurableObjectNamespace<CapabilitiesCache>;
+  RUNS_REGISTRY: DurableObjectNamespace<RunsRegistry>;
   OPENCODE_API_KEY: string;
   GIT_REPOS: string;
   GIT_TOKEN?: string;
@@ -22,7 +23,7 @@ type RunMeta = {
   branch?: string;
   createdAt: number;
   expiresAt: number;
-  status: "starting" | "ready" | "destroyed" | "error";
+  status: "starting" | "ready" | "error" | "stopped" | "destroyed";
   error?: string;
 };
 
@@ -55,7 +56,7 @@ const START_WAIT = {
 } as const;
 
 const CONTAINER_START = {
-  entrypoint: ["/home/dev/startup.sh"],
+  entrypoint: ["/bin/bash", "/home/dev/startup.sh"],
 } as const;
 
 const CAPABILITIES_KEY = "capabilities";
@@ -176,14 +177,162 @@ function capabilitiesStub(env: Env) {
   return env.CAPABILITIES.get(env.CAPABILITIES.idFromName("global"));
 }
 
-export class OpenCodeContainer extends Container<Env> {
+export type RunRegistryRecord = {
+  runId: string;
+  status: RunMeta["status"];
+  createdAt: number;
+  updatedAt: number;
+  expiresAt?: number;
+  error?: string;
+  repo?: string;
+  branch?: string;
+};
+
+function runsRegistryStub(env: Env) {
+  return env.RUNS_REGISTRY.get(env.RUNS_REGISTRY.idFromName("global"));
+}
+
+async function registryUpsert(
+  env: Env,
+  record: {
+    runId: string;
+    status: RunMeta["status"];
+    createdAt?: number;
+    updatedAt?: number;
+    expiresAt?: number | null;
+    error?: string | null;
+    repo?: string | null;
+    branch?: string | null;
+  },
+): Promise<void> {
+  try {
+    await runsRegistryStub(env).fetch(
+      new Request("http://registry/", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(record),
+      }),
+    );
+  } catch (e) {
+    console.error("registryUpsert failed", e);
+  }
+}
+
+async function registryRemove(env: Env, runId: string): Promise<void> {
+  try {
+    await runsRegistryStub(env).fetch(
+      new Request(`http://registry/?runId=${encodeURIComponent(runId)}`, {
+        method: "DELETE",
+      }),
+    );
+  } catch (e) {
+    console.error("registryRemove failed", e);
+  }
+}
+
+async function registryList(env: Env): Promise<RunRegistryRecord[]> {
+  try {
+    const resp = await runsRegistryStub(env).fetch(new Request("http://registry/"));
+    const body = (await resp.json().catch(() => ({ runs: [] }))) as { runs?: RunRegistryRecord[] };
+    return body.runs ?? [];
+  } catch (e) {
+    console.error("registryList failed", e);
+    return [];
+  }
+}
+
+/** Singleton DO: tracks active/recent runs for list/control APIs. */
+export class RunsRegistry extends DurableObject<Env> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS runs (
+        runId TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        createdAt INTEGER NOT NULL,
+        updatedAt INTEGER NOT NULL,
+        expiresAt INTEGER,
+        error TEXT,
+        repo TEXT,
+        branch TEXT
+      )
+    `);
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+
+    if (request.method === "GET") {
+      const rows = this.ctx.storage.sql
+        .exec(
+          `SELECT runId, status, createdAt, updatedAt, expiresAt, error, repo, branch
+           FROM runs ORDER BY updatedAt DESC`,
+        )
+        .toArray() as Array<Record<string, unknown>>;
+      const runs: RunRegistryRecord[] = rows.map((r) => ({
+        runId: String(r.runId),
+        status: r.status as RunMeta["status"],
+        createdAt: Number(r.createdAt),
+        updatedAt: Number(r.updatedAt),
+        expiresAt: r.expiresAt == null ? undefined : Number(r.expiresAt),
+        error: r.error == null ? undefined : String(r.error),
+        repo: r.repo == null ? undefined : String(r.repo),
+        branch: r.branch == null ? undefined : String(r.branch),
+      }));
+      return json({ runs });
+    }
+
+    if (request.method === "PUT") {
+      const body = (await request.json().catch(() => null)) as Partial<RunRegistryRecord> | null;
+      if (!body?.runId || !body.status) return json({ error: "runId and status required" }, 400);
+      const now = Date.now();
+      const existing = this.ctx.storage.sql
+        .exec(`SELECT createdAt FROM runs WHERE runId = ?`, body.runId)
+        .toArray() as Array<{ createdAt: number }>;
+      const createdAt = body.createdAt ?? existing[0]?.createdAt ?? now;
+      const updatedAt = body.updatedAt ?? now;
+      this.ctx.storage.sql.exec(
+        `INSERT INTO runs (runId, status, createdAt, updatedAt, expiresAt, error, repo, branch)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(runId) DO UPDATE SET
+           status = excluded.status,
+           updatedAt = excluded.updatedAt,
+           expiresAt = COALESCE(excluded.expiresAt, runs.expiresAt),
+           error = excluded.error,
+           repo = COALESCE(excluded.repo, runs.repo),
+           branch = COALESCE(excluded.branch, runs.branch),
+           createdAt = runs.createdAt`,
+        body.runId,
+        body.status,
+        createdAt,
+        updatedAt,
+        body.expiresAt ?? null,
+        body.error ?? null,
+        body.repo ?? null,
+        body.branch ?? null,
+      );
+      return json({ ok: true, runId: body.runId, status: body.status, updatedAt });
+    }
+
+    if (request.method === "DELETE") {
+      const runId = url.searchParams.get("runId") || url.pathname.split("/").filter(Boolean).pop();
+      if (!runId) return json({ error: "runId required" }, 400);
+      this.ctx.storage.sql.exec(`DELETE FROM runs WHERE runId = ?`, runId);
+      return json({ ok: true, runId });
+    }
+
+    return json({ error: "Method not allowed" }, 405);
+  }
+}
+
+export class OpenCodeRunner extends Container<Env> {
   defaultPort = 4096;
   // Idle sleep; hard TTL is enforced via DO alarm (~4h)
   sleepAfter = "4h";
   enableInternet = true;
   // Required: empty entrypoint from the Containers runtime would clear the image ENTRYPOINT
   // and the instance exits immediately with "container just exited".
-  entrypoint = ["/home/dev/startup.sh"];
+  entrypoint = ["/bin/bash", "/home/dev/startup.sh"];
 
   private startTime: number | null = null;
 
@@ -220,23 +369,40 @@ export class OpenCodeContainer extends Container<Env> {
     await this.ctx.storage.setAlarm(expiresAt);
   }
 
-  override async alarm(): Promise<void> {
+  /**
+   * Container SDK uses alarms for activity timeout / sleepAfter.
+   * Only hard-destroy when our per-run TTL has elapsed; otherwise defer to super.
+   */
+  override async alarm(alarmProps?: { isRetry?: boolean; retryCount?: number }): Promise<void> {
     const meta = await this.loadMeta();
-    console.log("Run lifetime alarm fired", meta?.runId);
-    try {
-      await this.destroy();
-    } catch (e) {
-      console.error("Alarm destroy failed", e);
+    const now = Date.now();
+    if (meta?.expiresAt && now >= meta.expiresAt) {
+      console.log("Run lifetime TTL alarm fired", meta.runId);
       try {
-        await this.stop();
-      } catch {
-        /* ignore */
+        await this.destroy();
+      } catch (e) {
+        console.error("Alarm destroy failed", e);
+        try {
+          await this.stop();
+        } catch {
+          /* ignore */
+        }
       }
-    }
-    if (meta) {
       meta.status = "destroyed";
       await this.saveMeta(meta);
+      await registryUpsert(this.env, {
+        runId: meta.runId,
+        status: "destroyed",
+        createdAt: meta.createdAt,
+        expiresAt: meta.expiresAt,
+        repo: meta.repo,
+        branch: meta.branch,
+      });
+      return;
     }
+    // Important: do not swallow Container SDK sleep/activity alarms.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (super.alarm as (p?: unknown) => Promise<void>)(alarmProps);
   }
 
   override async fetch(request: Request): Promise<Response> {
@@ -345,13 +511,44 @@ export class OpenCodeContainer extends Container<Env> {
     return caps;
   }
 
+
+  private async tryFetchCrashLog(): Promise<string | undefined> {
+    for (let i = 0; i < 5; i++) {
+      try {
+        if (i > 0) await new Promise((r) => setTimeout(r, 1000));
+        const running = this.ctx.container?.running ?? false;
+        if (!running && i < 4) continue;
+        const resp = await this.containerFetch(
+          `http://127.0.0.1:${this.defaultPort}/__opencode-log`,
+          this.defaultPort,
+        );
+        if (!resp.ok) continue;
+        const text = await resp.text();
+        if (text) return text.slice(0, 32_000);
+      } catch {
+        /* retry */
+      }
+    }
+    return undefined;
+  }
+
+  private containerStartOptions(): {
+    entrypoint: string[];
+    envVars: Record<string, string>;
+  } {
+    return {
+      entrypoint: ["/bin/bash", "/home/dev/startup.sh"],
+      envVars: { ...(this.envVars || {}) },
+    };
+  }
+
   private async doRefreshCapabilities(): Promise<Response> {
     const meta = await this.applyEnvFromMeta();
     if (!meta?.runId) return json({ error: "No run meta" }, 400);
     await this.startAndWaitForPorts({
       ports: [this.defaultPort],
       cancellationOptions: { ...START_WAIT },
-      startOptions: { ...CONTAINER_START },
+      startOptions: this.containerStartOptions(),
     });
     const capabilities = await this.collectAndStoreCapabilities(meta.runId);
     return json({ success: true, capabilities });
@@ -385,6 +582,15 @@ export class OpenCodeContainer extends Container<Env> {
     };
     await this.saveMeta(meta);
     await this.scheduleExpiry(expiresAt);
+    await registryUpsert(this.env, {
+      runId,
+      status: "starting",
+      createdAt,
+      expiresAt,
+      repo: body.repo,
+      branch: body.branch,
+      error: null,
+    });
 
     this.envVars = this.buildEnvVars(meta);
 
@@ -392,9 +598,61 @@ export class OpenCodeContainer extends Container<Env> {
       await this.startAndWaitForPorts({
         ports: [this.defaultPort],
         cancellationOptions: { ...START_WAIT },
+        startOptions: this.containerStartOptions(),
       });
+
+      // Detect crash keep-alive (opencode exited but port still answers).
+      let crashed = false;
+      let crashLog: string | undefined;
+      try {
+        const health = (await this.containerJson("/global/health")) as {
+          healthy?: boolean;
+          crash?: boolean;
+        };
+        if (health?.crash === true) {
+          crashed = true;
+          crashLog = await this.tryFetchCrashLog();
+        }
+      } catch {
+        /* health probe optional here; capabilities path also checks */
+      }
+
+      if (crashed) {
+        meta.status = "error";
+        meta.error = "OpenCode process exited; crash keep-alive is serving health";
+        await this.saveMeta(meta);
+        await registryUpsert(this.env, {
+          runId,
+          status: "error",
+          createdAt,
+          expiresAt,
+          repo: body.repo,
+          branch: body.branch,
+          error: meta.error,
+        });
+        return json(
+          {
+            success: false,
+            runId,
+            status: meta.status,
+            error: meta.error,
+            crashLog,
+          },
+          500,
+        );
+      }
+
       meta.status = "ready";
       await this.saveMeta(meta);
+      await registryUpsert(this.env, {
+        runId,
+        status: "ready",
+        createdAt,
+        expiresAt,
+        repo: body.repo,
+        branch: body.branch,
+        error: null,
+      });
 
       // Capture models/agents/providers for harness-router (served later without an instance).
       const capabilities = await this.collectAndStoreCapabilities(runId);
@@ -412,7 +670,26 @@ export class OpenCodeContainer extends Container<Env> {
       meta.status = "error";
       meta.error = error instanceof Error ? error.message : String(error);
       await this.saveMeta(meta);
-      return json({ success: false, runId, status: meta.status, error: meta.error }, 500);
+      await registryUpsert(this.env, {
+        runId,
+        status: "error",
+        createdAt,
+        expiresAt,
+        repo: body.repo,
+        branch: body.branch,
+        error: meta.error,
+      });
+      const crashLog = await this.tryFetchCrashLog();
+      return json(
+        {
+          success: false,
+          runId,
+          status: meta.status,
+          error: meta.error,
+          ...(crashLog ? { crashLog } : {}),
+        },
+        500,
+      );
     }
   }
 
@@ -437,20 +714,75 @@ export class OpenCodeContainer extends Container<Env> {
 
   private async doStart(): Promise<Response> {
     const meta = await this.applyEnvFromMeta();
-    await this.startAndWaitForPorts({
-      ports: [this.defaultPort],
-      cancellationOptions: { ...START_WAIT },
-      startOptions: { ...CONTAINER_START },
-    });
     if (meta) {
-      meta.status = "ready";
+      meta.status = "starting";
       await this.saveMeta(meta);
+      await registryUpsert(this.env, {
+        runId: meta.runId,
+        status: "starting",
+        createdAt: meta.createdAt,
+        expiresAt: meta.expiresAt,
+        repo: meta.repo,
+        branch: meta.branch,
+      });
     }
-    return json({ success: true, message: "Container started successfully" });
+    try {
+      await this.startAndWaitForPorts({
+        ports: [this.defaultPort],
+        cancellationOptions: { ...START_WAIT },
+        startOptions: this.containerStartOptions(),
+      });
+      if (meta) {
+        meta.status = "ready";
+        meta.error = undefined;
+        await this.saveMeta(meta);
+        await registryUpsert(this.env, {
+          runId: meta.runId,
+          status: "ready",
+          createdAt: meta.createdAt,
+          expiresAt: meta.expiresAt,
+          repo: meta.repo,
+          branch: meta.branch,
+          error: null,
+        });
+      }
+      return json({ success: true, message: "Container started successfully" });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (meta) {
+        meta.status = "error";
+        meta.error = msg;
+        await this.saveMeta(meta);
+        await registryUpsert(this.env, {
+          runId: meta.runId,
+          status: "error",
+          createdAt: meta.createdAt,
+          expiresAt: meta.expiresAt,
+          repo: meta.repo,
+          branch: meta.branch,
+          error: msg,
+        });
+      }
+      const crashLog = await this.tryFetchCrashLog();
+      return json({ success: false, error: msg, ...(crashLog ? { crashLog } : {}) }, 500);
+    }
   }
 
   private async doStop(): Promise<Response> {
     await this.stop();
+    const meta = await this.loadMeta();
+    if (meta) {
+      meta.status = "stopped";
+      await this.saveMeta(meta);
+      await registryUpsert(this.env, {
+        runId: meta.runId,
+        status: "stopped",
+        createdAt: meta.createdAt,
+        expiresAt: meta.expiresAt,
+        repo: meta.repo,
+        branch: meta.branch,
+      });
+    }
     return json({ success: true, message: "Container stop signal sent" });
   }
 
@@ -464,12 +796,33 @@ export class OpenCodeContainer extends Container<Env> {
     if (meta) {
       meta.status = "destroyed";
       await this.saveMeta(meta);
+      await registryUpsert(this.env, {
+        runId: meta.runId,
+        status: "destroyed",
+        createdAt: meta.createdAt,
+        expiresAt: meta.expiresAt,
+        repo: meta.repo,
+        branch: meta.branch,
+      });
     }
     await this.ctx.storage.deleteAlarm();
     return json({ success: true, message: "Container destroyed" });
   }
 
   private async doRestart(): Promise<Response> {
+    const meta = await this.applyEnvFromMeta();
+    if (meta) {
+      meta.status = "starting";
+      await this.saveMeta(meta);
+      await registryUpsert(this.env, {
+        runId: meta.runId,
+        status: "starting",
+        createdAt: meta.createdAt,
+        expiresAt: meta.expiresAt,
+        repo: meta.repo,
+        branch: meta.branch,
+      });
+    }
     try {
       await this.stop();
     } catch {
@@ -477,12 +830,46 @@ export class OpenCodeContainer extends Container<Env> {
     }
     await new Promise((resolve) => setTimeout(resolve, 3000));
     await this.applyEnvFromMeta();
-    await this.startAndWaitForPorts({
-      ports: [this.defaultPort],
-      cancellationOptions: { ...START_WAIT },
-      startOptions: { ...CONTAINER_START },
-    });
-    return json({ success: true, message: "Container restarted successfully" });
+    try {
+      await this.startAndWaitForPorts({
+        ports: [this.defaultPort],
+        cancellationOptions: { ...START_WAIT },
+        startOptions: this.containerStartOptions(),
+      });
+      if (meta) {
+        meta.status = "ready";
+        meta.error = undefined;
+        await this.saveMeta(meta);
+        await registryUpsert(this.env, {
+          runId: meta.runId,
+          status: "ready",
+          createdAt: meta.createdAt,
+          expiresAt: meta.expiresAt,
+          repo: meta.repo,
+          branch: meta.branch,
+          error: null,
+        });
+      }
+      return json({ success: true, message: "Container restarted successfully" });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (meta) {
+        meta.status = "error";
+        meta.error = msg;
+        await this.saveMeta(meta);
+        await registryUpsert(this.env, {
+          runId: meta.runId,
+          status: "error",
+          createdAt: meta.createdAt,
+          expiresAt: meta.expiresAt,
+          repo: meta.repo,
+          branch: meta.branch,
+          error: msg,
+        });
+      }
+      const crashLog = await this.tryFetchCrashLog();
+      return json({ success: false, error: msg, ...(crashLog ? { crashLog } : {}) }, 500);
+    }
   }
 
   private async getConfig(): Promise<Response> {
@@ -641,6 +1028,37 @@ app.post("/api/runs", async (c) => {
   );
 });
 
+/** List runs from the registry (no container start). */
+app.get("/api/runs", async (c) => {
+  if (!requireRunnerAuth(c)) return c.json({ error: "Unauthorized" }, 401);
+  const runs = await registryList(c.env);
+  return c.json({ runs });
+});
+
+app.post("/api/runs/:runId/start", async (c) => {
+  if (!requireRunnerAuth(c)) return c.json({ error: "Unauthorized" }, 401);
+  const runId = sanitizeRunId(c.req.param("runId"));
+  if (!runId) return c.json({ error: "Invalid runId" }, 400);
+  const container = getContainer(c.env.OPENCODE_CONTAINER, runId);
+  return container.fetch(new Request("http://localhost/__admin/start", { method: "POST" }));
+});
+
+app.post("/api/runs/:runId/stop", async (c) => {
+  if (!requireRunnerAuth(c)) return c.json({ error: "Unauthorized" }, 401);
+  const runId = sanitizeRunId(c.req.param("runId"));
+  if (!runId) return c.json({ error: "Invalid runId" }, 400);
+  const container = getContainer(c.env.OPENCODE_CONTAINER, runId);
+  return container.fetch(new Request("http://localhost/__admin/stop", { method: "POST" }));
+});
+
+app.post("/api/runs/:runId/restart", async (c) => {
+  if (!requireRunnerAuth(c)) return c.json({ error: "Unauthorized" }, 401);
+  const runId = sanitizeRunId(c.req.param("runId"));
+  if (!runId) return c.json({ error: "Invalid runId" }, 400);
+  const container = getContainer(c.env.OPENCODE_CONTAINER, runId);
+  return container.fetch(new Request("http://localhost/__admin/restart", { method: "POST" }));
+});
+
 app.get("/api/runs/:runId", async (c) => {
   if (!requireRunnerAuth(c)) return c.json({ error: "Unauthorized" }, 401);
   const runId = sanitizeRunId(c.req.param("runId"));
@@ -663,6 +1081,7 @@ app.delete("/api/runs/:runId", async (c) => {
     new Request("http://localhost/__admin/destroy", { method: "POST" }),
   );
   const payload = (await destroyResp.json().catch(() => ({}))) as Record<string, unknown>;
+  await registryRemove(c.env, runId);
   return new Response(JSON.stringify({ runId, ...payload }), {
     status: destroyResp.status,
     headers: { "Content-Type": "application/json" },
@@ -705,13 +1124,17 @@ app.use("/admin/*", cors());
 
 app.get("/admin", (c) => c.html(getAdminHTML()));
 
-// Admin helpers still target an explicit run via ?runId= or default demo id
+// Admin helpers: list from registry (no bearer); actions take ?runId=
 app.all("/admin/api/:action", async (c) => {
-  const runId = sanitizeRunId(c.req.query("runId") || "opencode-main");
-  if (!runId) return c.json({ error: "Invalid runId" }, 400);
   const action = c.req.param("action");
-  const container = getContainer(c.env.OPENCODE_CONTAINER, runId);
   try {
+    if (action === "list") {
+      const runs = await registryList(c.env);
+      return c.json({ runs });
+    }
+    const runId = sanitizeRunId(c.req.query("runId") || "opencode-main");
+    if (!runId) return c.json({ error: "Invalid runId" }, 400);
+    const container = getContainer(c.env.OPENCODE_CONTAINER, runId);
     if (action === "status" || action === "config") {
       return container.fetch(new Request(`http://localhost/__admin/${action}`));
     }
@@ -730,9 +1153,16 @@ app.all("*", (c) => {
     {
       error: "Use per-run URLs",
       createRun: "POST /api/runs",
+      listRuns: "GET /api/runs",
+      getRun: "GET /api/runs/:runId",
+      startRun: "POST /api/runs/:runId/start",
+      stopRun: "POST /api/runs/:runId/stop",
+      restartRun: "POST /api/runs/:runId/restart",
+      deleteRun: "DELETE /api/runs/:runId",
       openRun: "/r/:runId/",
       capabilities: "GET /api/capabilities",
       health: "GET /api/health",
+      admin: "GET /admin",
     },
     404,
   );

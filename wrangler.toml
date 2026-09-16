@@ -1,20 +1,24 @@
-name = "cloudflare-opencode-runner"
+name = "opencode-server"
 main = "src/index.ts"
 compatibility_date = "2025-01-14"
 
 [[containers]]
-class_name = "OpenCodeContainer"
+class_name = "OpenCodeRunner"
 image = "./Dockerfile"
-max_instances = 4
+max_instances = 8
 instance_type = "standard-2"
 
 [[durable_objects.bindings]]
 name = "OPENCODE_CONTAINER"
-class_name = "OpenCodeContainer"
+class_name = "OpenCodeRunner"
 
 [[durable_objects.bindings]]
 name = "CAPABILITIES"
 class_name = "CapabilitiesCache"
+
+[[durable_objects.bindings]]
+name = "RUNS_REGISTRY"
+class_name = "RunsRegistry"
 
 [[migrations]]
 tag = "v1"
@@ -24,7 +28,22 @@ new_sqlite_classes = ["OpenCodeContainer"]
 tag = "v2"
 new_sqlite_classes = ["CapabilitiesCache"]
 
+[[migrations]]
+tag = "v3"
+renamed_classes = [{ from = "OpenCodeContainer", to = "OpenCodeRunner" }]
+
+[[migrations]]
+tag = "v4"
+deleted_classes = ["OpenCodeRunner"]
+
+[[migrations]]
+tag = "v5"
+new_sqlite_classes = ["OpenCodeRunner"]
+
+[[migrations]]
+tag = "v6"
+new_sqlite_classes = ["RunsRegistry"]
+
 [vars]
-# Global defaults; per-run GIT_REPOS override these via the runs API
 GIT_REPOS = ""
 MAX_RUN_LIFETIME_MS = "14400000"

@@ -4,13 +4,13 @@ export function getAdminHTML(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>OpenCode Container Admin</title>
+  <title>OpenCode Runner Admin</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
-    .status-healthy { color: #4ade80; }
-    .status-running { color: #facc15; }
-    .status-stopped { color: #f87171; }
-    .status-stopping { color: #fb923c; }
+    .status-ready, .status-healthy, .status-running { color: #4ade80; }
+    .status-starting { color: #facc15; }
+    .status-stopped, .status-stopping { color: #fb923c; }
+    .status-error, .status-destroyed { color: #f87171; }
     .status-unknown { color: #9ca3af; }
     .pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
@@ -18,375 +18,217 @@ export function getAdminHTML(): string {
 </head>
 <body class="bg-gray-900 text-white min-h-screen">
   <div class="container mx-auto px-4 py-8 max-w-5xl">
-    <!-- Header -->
     <div class="flex items-center justify-between mb-8">
       <div>
-        <h1 class="text-3xl font-bold">OpenCode Container Admin</h1>
-        <p class="text-gray-400 mt-1">Manage your OpenCode server instance</p>
+        <h1 class="text-3xl font-bold">OpenCode Runner Admin</h1>
+        <p class="text-gray-400 mt-1">List and control per-run container instances</p>
       </div>
-      <div class="flex items-center gap-2">
+      <div class="flex items-center gap-3">
+        <button onclick="createRun()" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded text-sm font-medium">Create run</button>
+        <button onclick="refreshRuns()" class="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded text-sm">Refresh</button>
         <span id="live-indicator" class="w-3 h-3 rounded-full bg-green-500 pulse"></span>
-        <span class="text-sm text-gray-400">Live</span>
-      </div>
-    </div>
-    
-    <!-- Status Card -->
-    <div class="bg-gray-800 rounded-lg p-6 mb-6 border border-gray-700">
-      <div class="flex items-center justify-between mb-4">
-        <h2 class="text-xl font-semibold">Container Status</h2>
-        <button 
-          onclick="refreshStatus()" 
-          class="text-sm bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded transition-colors"
-        >
-          Refresh
-        </button>
-      </div>
-      <div id="status" class="space-y-3">
-        <div class="flex items-center gap-2">
-          <div class="w-4 h-4 rounded-full bg-gray-600 animate-pulse"></div>
-          <span class="text-gray-400">Loading status...</span>
-        </div>
-      </div>
-    </div>
-    
-    <!-- Controls -->
-    <div class="bg-gray-800 rounded-lg p-6 mb-6 border border-gray-700">
-      <h2 class="text-xl font-semibold mb-4">Container Controls</h2>
-      <div class="flex gap-4 flex-wrap">
-        <button 
-          onclick="startContainer()" 
-          id="btn-start"
-          class="bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed px-6 py-2.5 rounded font-medium transition-colors flex items-center gap-2"
-        >
-          <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/></svg>
-          Start
-        </button>
-        <button 
-          onclick="stopContainer()" 
-          id="btn-stop"
-          class="bg-yellow-600 hover:bg-yellow-700 disabled:bg-gray-600 disabled:cursor-not-allowed px-6 py-2.5 rounded font-medium transition-colors flex items-center gap-2"
-        >
-          <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M5.75 3A1.75 1.75 0 004 4.75v10.5c0 .966.784 1.75 1.75 1.75h8.5A1.75 1.75 0 0016 15.25V4.75A1.75 1.75 0 0014.25 3h-8.5z"/></svg>
-          Stop
-        </button>
-        <button 
-          onclick="restartContainer()" 
-          id="btn-restart"
-          class="bg-orange-600 hover:bg-orange-700 disabled:bg-gray-600 disabled:cursor-not-allowed px-6 py-2.5 rounded font-medium transition-colors flex items-center gap-2"
-        >
-          <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M15.312 11.424a5.5 5.5 0 01-9.201 2.466l-.312-.311h2.433a.75.75 0 000-1.5H3.989a.75.75 0 00-.75.75v4.242a.75.75 0 001.5 0v-2.43l.31.31a7 7 0 0011.712-3.138.75.75 0 00-1.449-.39zm1.23-3.723a.75.75 0 00.219-.53V2.929a.75.75 0 00-1.5 0v2.43l-.31-.31A7 7 0 003.239 8.188a.75.75 0 101.448.389 5.5 5.5 0 019.201-2.466l.312.311h-2.433a.75.75 0 000 1.5h4.243a.75.75 0 00.53-.219z" clip-rule="evenodd"/></svg>
-          Restart
-        </button>
-      </div>
-      <div id="action-result" class="mt-4 text-sm min-h-[24px]"></div>
-    </div>
-    
-    <!-- Configuration -->
-    <div class="bg-gray-800 rounded-lg p-6 mb-6 border border-gray-700">
-      <div class="flex items-center justify-between mb-4">
-        <h2 class="text-xl font-semibold">Configuration</h2>
-        <button 
-          onclick="refreshConfig()" 
-          class="text-sm bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded transition-colors"
-        >
-          Refresh
-        </button>
-      </div>
-      <div id="config" class="space-y-4">
-        <p class="text-gray-400">Loading configuration...</p>
       </div>
     </div>
 
-    <!-- Quick Links -->
+    <div id="action-result" class="mb-4 text-sm min-h-[20px]"></div>
+
     <div class="bg-gray-800 rounded-lg p-6 mb-6 border border-gray-700">
-      <h2 class="text-xl font-semibold mb-4">Quick Links</h2>
-      <div class="flex gap-4 flex-wrap">
-        <a 
-          href="/" 
-          target="_blank"
-          class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded transition-colors flex items-center gap-2"
-        >
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
-          Open OpenCode Web UI
-        </a>
-        <a 
-          href="/global/health" 
-          target="_blank"
-          class="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded transition-colors flex items-center gap-2"
-        >
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-          Health Check
-        </a>
-        <a 
-          href="/doc" 
-          target="_blank"
-          class="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded transition-colors flex items-center gap-2"
-        >
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
-          API Docs
-        </a>
+      <h2 class="text-xl font-semibold mb-4">Runs</h2>
+      <div id="runs-list" class="space-y-3">
+        <p class="text-gray-400">Loading runs...</p>
       </div>
     </div>
-    
-    <!-- Footer -->
-    <div class="text-center text-gray-500 text-sm mt-8">
-      <p>OpenCode on Cloudflare Containers</p>
+
+    <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
+      <h2 class="text-xl font-semibold mb-2">Selected run detail</h2>
+      <p id="selected-label" class="text-gray-400 text-sm mb-4">Select a run to view status</p>
+      <div id="status" class="space-y-3 mb-4"></div>
+      <div class="flex gap-3 flex-wrap">
+        <button id="btn-start" onclick="runAction('start')" class="bg-green-600 hover:bg-green-700 disabled:bg-gray-600 px-4 py-2 rounded" disabled>Start</button>
+        <button id="btn-stop" onclick="runAction('stop')" class="bg-yellow-600 hover:bg-yellow-700 disabled:bg-gray-600 px-4 py-2 rounded" disabled>Stop</button>
+        <button id="btn-restart" onclick="runAction('restart')" class="bg-orange-600 hover:bg-orange-700 disabled:bg-gray-600 px-4 py-2 rounded" disabled>Restart</button>
+        <button id="btn-destroy" onclick="runAction('destroy')" class="bg-red-700 hover:bg-red-800 disabled:bg-gray-600 px-4 py-2 rounded" disabled>Destroy</button>
+      </div>
     </div>
   </div>
 
   <script>
-    const API_BASE = '/admin/api';
+    let selectedRunId = null;
     let autoRefreshInterval = null;
-    
-    async function fetchAPI(endpoint, options = {}) {
+
+    async function fetchJSON(url, options = {}) {
       try {
-        const response = await fetch(API_BASE + endpoint, {
+        const response = await fetch(url, {
           ...options,
-          headers: {
-            'Content-Type': 'application/json',
-            ...options.headers,
-          },
+          headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+          credentials: 'include',
         });
+        const text = await response.text();
+        let data;
+        try { data = JSON.parse(text); } catch { data = { raw: text }; }
         if (!response.ok) {
-          const text = await response.text();
-          throw new Error(text || response.statusText);
+          return { error: data.error || data.message || text || response.statusText, status: response.status, ...data };
         }
-        return await response.json();
+        return data;
       } catch (error) {
-        console.error('API Error:', error);
         return { error: error.message };
       }
     }
-    
-    function formatUptime(ms) {
-      if (!ms) return 'N/A';
-      const seconds = Math.floor(ms / 1000);
-      const minutes = Math.floor(seconds / 60);
-      const hours = Math.floor(minutes / 60);
-      const days = Math.floor(hours / 24);
-      
-      if (days > 0) return days + 'd ' + (hours % 24) + 'h';
-      if (hours > 0) return hours + 'h ' + (minutes % 60) + 'm';
-      if (minutes > 0) return minutes + 'm ' + (seconds % 60) + 's';
-      return seconds + 's';
+
+    function showResult(message, ok = true) {
+      const el = document.getElementById('action-result');
+      el.className = 'mb-4 text-sm ' + (ok === 'info' ? 'text-blue-400' : ok ? 'text-green-400' : 'text-red-400');
+      el.textContent = message || '';
     }
-    
-    async function refreshStatus() {
-      const data = await fetchAPI('/status');
-      const statusDiv = document.getElementById('status');
-      
+
+    function statusClass(status) {
+      return 'status-' + (status || 'unknown');
+    }
+
+    async function loadRuns() {
+      // Prefer public API (Access cookie). Fallback to admin list (no bearer).
+      let data = await fetchJSON('/api/runs');
+      if (data.error || !Array.isArray(data.runs)) {
+        data = await fetchJSON('/admin/api/list');
+      }
+      return data;
+    }
+
+    async function refreshRuns() {
+      const data = await loadRuns();
+      const list = document.getElementById('runs-list');
       if (data.error) {
-        statusDiv.innerHTML = \`
-          <div class="bg-red-900/30 border border-red-700 rounded p-3">
-            <p class="text-red-400 font-medium">Error fetching status</p>
-            <p class="text-red-300 text-sm mt-1">\${data.error}</p>
+        list.innerHTML = '<p class="text-red-400">Error: ' + data.error + '</p>';
+        return;
+      }
+      const runs = data.runs || [];
+      if (!runs.length) {
+        list.innerHTML = '<p class="text-gray-500 italic">No runs registered yet. Create one to get started.</p>';
+        return;
+      }
+      list.innerHTML = runs.map(r => {
+        const active = r.runId === selectedRunId ? 'ring-2 ring-blue-500' : '';
+        const ui = '/r/' + encodeURIComponent(r.runId) + '/';
+        return \`
+          <div class="bg-gray-900/50 rounded-lg p-4 \${active} cursor-pointer hover:bg-gray-900" onclick="selectRun('\${r.runId}')">
+            <div class="flex items-center justify-between gap-4 flex-wrap">
+              <div>
+                <div class="font-mono text-sm">\${r.runId}</div>
+                <div class="text-xs text-gray-400 mt-1">
+                  <span class="\${statusClass(r.status)}">\${(r.status || 'unknown').toUpperCase()}</span>
+                  \${r.repo ? ' · ' + r.repo : ''}
+                  \${r.branch ? '@' + r.branch : ''}
+                </div>
+                \${r.error ? '<div class="text-xs text-red-400 mt-1 truncate" title="' + String(r.error).replace(/"/g,'&quot;') + '">' + r.error + '</div>' : ''}
+              </div>
+              <div class="flex gap-2 items-center">
+                <a href="\${ui}" target="_blank" onclick="event.stopPropagation()" class="text-xs bg-blue-700 hover:bg-blue-600 px-3 py-1 rounded">Open UI</a>
+                <button onclick="event.stopPropagation(); selectRun('\${r.runId}'); runAction('start')" class="text-xs bg-green-700 hover:bg-green-600 px-2 py-1 rounded">Start</button>
+                <button onclick="event.stopPropagation(); selectRun('\${r.runId}'); runAction('stop')" class="text-xs bg-yellow-700 hover:bg-yellow-600 px-2 py-1 rounded">Stop</button>
+                <button onclick="event.stopPropagation(); selectRun('\${r.runId}'); runAction('restart')" class="text-xs bg-orange-700 hover:bg-orange-600 px-2 py-1 rounded">Restart</button>
+                <button onclick="event.stopPropagation(); selectRun('\${r.runId}'); runAction('destroy')" class="text-xs bg-red-800 hover:bg-red-700 px-2 py-1 rounded">Destroy</button>
+              </div>
+            </div>
           </div>
         \`;
-        updateButtons('unknown');
+      }).join('');
+    }
+
+    async function selectRun(runId) {
+      selectedRunId = runId;
+      document.getElementById('selected-label').textContent = 'Run: ' + runId;
+      ['btn-start','btn-stop','btn-restart','btn-destroy'].forEach(id => {
+        document.getElementById(id).disabled = false;
+      });
+      await refreshRuns();
+      await refreshSelectedStatus();
+    }
+
+    async function refreshSelectedStatus() {
+      const statusDiv = document.getElementById('status');
+      if (!selectedRunId) {
+        statusDiv.innerHTML = '';
         return;
       }
-      
-      const statusClass = 'status-' + (data.status || 'unknown');
-      const isRunning = data.status === 'running' || data.status === 'healthy';
-      
-      statusDiv.innerHTML = \`
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div class="bg-gray-900/50 rounded-lg p-4">
-            <div class="flex items-center gap-3 mb-3">
-              <div class="w-4 h-4 rounded-full \${isRunning ? 'bg-green-500' : 'bg-red-500'}"></div>
-              <span class="text-lg font-semibold \${statusClass}">\${(data.status || 'unknown').toUpperCase()}</span>
-            </div>
-            <div class="space-y-2 text-sm">
-              <div class="flex justify-between">
-                <span class="text-gray-400">Running:</span>
-                <span>\${data.running ? 'Yes' : 'No'}</span>
-              </div>
-              <div class="flex justify-between">
-                <span class="text-gray-400">Uptime:</span>
-                <span>\${formatUptime(data.uptime)}</span>
-              </div>
-              \${data.exitCode !== null && data.exitCode !== undefined ? \`
-              <div class="flex justify-between">
-                <span class="text-gray-400">Exit Code:</span>
-                <span class="text-red-400">\${data.exitCode}</span>
-              </div>
-              \` : ''}
-            </div>
-          </div>
-          
-          <div class="bg-gray-900/50 rounded-lg p-4">
-            <h3 class="font-medium mb-3 text-gray-300">Container Info</h3>
-            <div class="space-y-2 text-sm">
-              <div class="flex justify-between">
-                <span class="text-gray-400">Port:</span>
-                <span>\${data.defaultPort}</span>
-              </div>
-              <div class="flex justify-between">
-                <span class="text-gray-400">Sleep After:</span>
-                <span>\${data.sleepAfter}</span>
-              </div>
-              <div class="flex justify-between">
-                <span class="text-gray-400">Internet:</span>
-                <span>\${data.enableInternet ? 'Enabled' : 'Disabled'}</span>
-              </div>
-              <div class="flex justify-between">
-                <span class="text-gray-400">Last Change:</span>
-                <span class="text-xs">\${data.lastChangeFormatted || 'N/A'}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      \`;
-      
-      updateButtons(data.status, data.running);
-    }
-    
-    function updateButtons(status, running) {
-      const btnStart = document.getElementById('btn-start');
-      const btnStop = document.getElementById('btn-stop');
-      const btnRestart = document.getElementById('btn-restart');
-      
-      const isRunning = status === 'running' || status === 'healthy';
-      const isStopping = status === 'stopping';
-      
-      btnStart.disabled = isRunning || isStopping;
-      btnStop.disabled = !isRunning || isStopping;
-      btnRestart.disabled = isStopping;
-    }
-    
-    async function refreshConfig() {
-      const data = await fetchAPI('/config');
-      const configDiv = document.getElementById('config');
-      
+      const data = await fetchJSON('/admin/api/status?runId=' + encodeURIComponent(selectedRunId));
       if (data.error) {
-        configDiv.innerHTML = '<p class="text-red-400">Error: ' + data.error + '</p>';
+        statusDiv.innerHTML = '<p class="text-red-400">' + data.error + '</p>';
         return;
       }
-      
-      configDiv.innerHTML = \`
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div class="bg-gray-900/50 rounded-lg p-4">
-            <h3 class="font-medium mb-3 text-gray-300">Secrets Status</h3>
-            <div class="space-y-2 text-sm">
-              <div class="flex justify-between items-center">
-                <span class="text-gray-400">Server Password:</span>
-                <span class="\${data.envVars?.hasServerPassword ? 'text-green-400' : 'text-red-400'}">\${data.envVars?.hasServerPassword ? '✓ Set' : '✗ Not set'}</span>
-              </div>
-              <div class="flex justify-between items-center">
-                <span class="text-gray-400">OpenCode API Key:</span>
-                <span class="\${data.envVars?.hasApiKey ? 'text-green-400' : 'text-red-400'}">\${data.envVars?.hasApiKey ? '✓ Set' : '✗ Not set'}</span>
-              </div>
-              <div class="flex justify-between items-center">
-                <span class="text-gray-400">Git Token:</span>
-                <span class="\${data.envVars?.hasGitToken ? 'text-green-400' : 'text-gray-500'}">\${data.envVars?.hasGitToken ? '✓ Set' : '○ Not set'}</span>
-              </div>
-              <div class="flex justify-between items-center">
-                <span class="text-gray-400">Admin Password:</span>
-                <span class="\${data.envVars?.hasAdminPassword ? 'text-green-400' : 'text-yellow-400'}">\${data.envVars?.hasAdminPassword ? '✓ Set' : '○ Using server password'}</span>
-              </div>
-            </div>
+      const ui = '/r/' + encodeURIComponent(selectedRunId) + '/';
+      statusDiv.innerHTML = \`
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+          <div class="bg-gray-900/50 rounded p-3 space-y-1">
+            <div class="flex justify-between"><span class="text-gray-400">Container</span><span class="\${statusClass(data.status)}">\${data.status || 'unknown'}</span></div>
+            <div class="flex justify-between"><span class="text-gray-400">Running</span><span>\${data.running ? 'Yes' : 'No'}</span></div>
+            <div class="flex justify-between"><span class="text-gray-400">Run status</span><span class="\${statusClass(data.run?.status)}">\${data.run?.status || 'n/a'}</span></div>
+            \${data.exitCode != null ? '<div class="flex justify-between"><span class="text-gray-400">Exit</span><span class="text-red-400">' + data.exitCode + '</span></div>' : ''}
           </div>
-          
-          <div class="bg-gray-900/50 rounded-lg p-4">
-            <h3 class="font-medium mb-3 text-gray-300">Git Repositories</h3>
-            <div class="text-sm">
-              \${data.envVars?.GIT_REPOS ? \`
-                <ul class="space-y-1">
-                  \${data.envVars.GIT_REPOS.split(',').filter(r => r.trim()).map(repo => \`
-                    <li class="text-gray-300 truncate" title="\${repo.trim()}">
-                      <span class="text-gray-500">•</span> \${repo.trim().split('/').slice(-1)[0].replace('.git', '') || repo.trim()}
-                    </li>
-                  \`).join('')}
-                </ul>
-              \` : '<p class="text-gray-500 italic">No repositories configured</p>'}
-            </div>
+          <div class="bg-gray-900/50 rounded p-3 space-y-1">
+            <div class="flex justify-between"><span class="text-gray-400">UI</span><a class="text-blue-400" href="\${ui}" target="_blank">\${ui}</a></div>
+            <div class="flex justify-between"><span class="text-gray-400">Expires</span><span class="text-xs">\${data.run?.expiresAt ? new Date(data.run.expiresAt).toLocaleString() : 'n/a'}</span></div>
+            <div class="flex justify-between"><span class="text-gray-400">Last change</span><span class="text-xs">\${data.lastChangeFormatted || 'n/a'}</span></div>
           </div>
         </div>
-        
-        <div class="mt-4 bg-gray-900/50 rounded-lg p-4">
-          <h3 class="font-medium mb-3 text-gray-300">Model Configuration</h3>
-          <div class="text-sm">
-            <div class="flex justify-between items-center">
-              <span class="text-gray-400">Provider:</span>
-              <span class="text-blue-400">OpenCode Zen</span>
-            </div>
-            <div class="flex justify-between items-center mt-2">
-              <span class="text-gray-400">Default Model:</span>
-              <span class="font-mono text-xs bg-gray-800 px-2 py-1 rounded">\${data.containerConfig?.model || 'opencode/claude-sonnet-4'}</span>
-            </div>
-          </div>
-        </div>
+        \${data.run?.error ? '<p class="text-red-400 text-sm mt-2">' + data.run.error + '</p>' : ''}
       \`;
     }
-    
-    async function startContainer() {
-      disableAllButtons();
-      showActionResult('Starting container...', 'info');
-      const data = await fetchAPI('/start', { method: 'POST' });
-      showActionResult(data.message || data.error, !data.error);
-      setTimeout(refreshStatus, 2000);
-    }
-    
-    async function stopContainer() {
-      disableAllButtons();
-      showActionResult('Stopping container...', 'info');
-      const data = await fetchAPI('/stop', { method: 'POST' });
-      showActionResult(data.message || data.error, !data.error);
-      setTimeout(refreshStatus, 2000);
-    }
-    
-    async function restartContainer() {
-      disableAllButtons();
-      showActionResult('Restarting container (this may take a moment)...', 'info');
-      const data = await fetchAPI('/restart', { method: 'POST' });
-      showActionResult(data.message || data.error, !data.error);
-      setTimeout(refreshStatus, 5000);
-    }
-    
-    function disableAllButtons() {
-      document.getElementById('btn-start').disabled = true;
-      document.getElementById('btn-stop').disabled = true;
-      document.getElementById('btn-restart').disabled = true;
-    }
-    
-    function showActionResult(message, successOrType = true) {
-      const resultDiv = document.getElementById('action-result');
-      let colorClass = 'text-green-400';
-      
-      if (successOrType === 'info') {
-        colorClass = 'text-blue-400';
-      } else if (successOrType === false || successOrType === 'error') {
-        colorClass = 'text-red-400';
+
+    async function runAction(action) {
+      if (!selectedRunId) {
+        showResult('Select a run first', false);
+        return;
       }
-      
-      resultDiv.className = 'mt-4 text-sm ' + colorClass;
-      resultDiv.textContent = message;
-      
-      // Clear message after 10 seconds
-      setTimeout(() => {
-        if (resultDiv.textContent === message) {
-          resultDiv.textContent = '';
+      showResult(action + ' ' + selectedRunId + '...', 'info');
+      let data;
+      if (action === 'destroy') {
+        data = await fetchJSON('/api/runs/' + encodeURIComponent(selectedRunId), { method: 'DELETE' });
+        if (data.error) {
+          data = await fetchJSON('/admin/api/destroy?runId=' + encodeURIComponent(selectedRunId), { method: 'POST' });
         }
-      }, 10000);
-    }
-    
-    // Start auto-refresh
-    function startAutoRefresh() {
-      if (autoRefreshInterval) clearInterval(autoRefreshInterval);
-      autoRefreshInterval = setInterval(refreshStatus, 30000); // Every 30 seconds
-    }
-    
-    // Initial load
-    refreshStatus();
-    refreshConfig();
-    startAutoRefresh();
-    
-    // Refresh on visibility change
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') {
-        refreshStatus();
-        refreshConfig();
+      } else {
+        data = await fetchJSON('/api/runs/' + encodeURIComponent(selectedRunId) + '/' + action, { method: 'POST' });
+        if (data.error) {
+          data = await fetchJSON('/admin/api/' + action + '?runId=' + encodeURIComponent(selectedRunId), { method: 'POST' });
+        }
       }
+      if (data.error && !data.success) {
+        showResult(data.error + (data.crashLog ? ' (see crashLog)' : ''), false);
+      } else {
+        showResult(data.message || (action + ' ok'), true);
+      }
+      setTimeout(async () => {
+        await refreshRuns();
+        await refreshSelectedStatus();
+      }, 1500);
+    }
+
+    async function createRun() {
+      const runId = 'admin-' + Date.now().toString(36);
+      showResult('Creating ' + runId + '...', 'info');
+      let data = await fetchJSON('/api/runs', {
+        method: 'POST',
+        body: JSON.stringify({ runId }),
+      });
+      if (data.error && data.status === 401) {
+        showResult('Create requires runner bearer token via /api/runs; using admin bootstrap path is not available. Error: ' + data.error, false);
+        return;
+      }
+      if (data.error || data.success === false) {
+        showResult((data.error || 'create failed') + (data.crashLog ? ' | crashLog available in response' : ''), false);
+        console.log('create response', data);
+      } else {
+        showResult('Created ' + runId, true);
+      }
+      selectedRunId = runId;
+      await refreshRuns();
+      await refreshSelectedStatus();
+    }
+
+    refreshRuns();
+    autoRefreshInterval = setInterval(refreshRuns, 30000);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') refreshRuns();
     });
   </script>
 </body>

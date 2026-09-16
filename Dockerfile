@@ -9,6 +9,7 @@ RUN mkdir -p /home/dev/.config/opencode \
              /home/dev/.local/share/opencode
 COPY --chown=dev:dev opencode.json /home/dev/.config/opencode/opencode.json
 COPY --chown=dev:dev startup.sh /home/dev/startup.sh
+COPY --chown=dev:dev keepalive.js /home/dev/keepalive.js
 RUN chmod +x /home/dev/startup.sh
 EXPOSE 4096
-ENTRYPOINT ["/home/dev/startup.sh"]
+ENTRYPOINT ["/bin/bash", "/home/dev/startup.sh"]

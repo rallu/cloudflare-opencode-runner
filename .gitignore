@@ -1,11 +1,34 @@
+# Dependencies
 node_modules/
+
+# Build output
+dist/
 .wrangler/
+
+# Environment files
+.env
+.env.local
 .dev.vars
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+
+# Local deploy/runtime secrets (never publish)
 .runner-api-token
 .generated-server-password
 .deploy-last-*
-*.log
-*.pem
-.DS_Store
-dist/
-src/index.ts.bak
+.deploy-*.log
+.dev.vars
+Dockerfile.minimal
+Dockerfile.opencode.bak
