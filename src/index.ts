@@ -939,11 +939,16 @@ function clearOcRunCookieHeader(): string {
   return `${OC_RUN_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=None; Max-Age=0`;
 }
 
-/** Rewrite root-absolute href/src in HTML so assets resolve under /r/:runId/. */
+/** Rewrite root-absolute href/src in HTML so assets resolve under /r/:runId/.
+ * Also strip <link rel="manifest"> — browsers fetch manifests without cookies,
+ * so Cloudflare Access redirects to the login host and CSP blocks it.
+ */
 function rewriteHtmlRootAbsolute(html: string, runId: string): string {
   const prefix = `/r/${runId}`;
+  // Drop PWA manifest under Access (credentialless fetch → Access login → CSP).
+  let out = html.replace(/<link\b[^>]*\brel=(["'])manifest\1[^>]*>\s*/gi, "");
   // href="/..." or src="/..." (and single-quoted) — not protocol-relative //
-  return html.replace(
+  out = out.replace(
     /\b(href|src)=(["'])\/(?!\/)([^"']*)\2/gi,
     (_m, attr: string, q: string, rest: string) => {
       // Already under this run prefix — leave alone
@@ -956,6 +961,7 @@ function rewriteHtmlRootAbsolute(html: string, runId: string): string {
       return `${attr}=${q}${prefix}/${rest}${q}`;
     },
   );
+  return out;
 }
 
 async function proxyToRun(
@@ -1037,6 +1043,33 @@ app.get("/worker-health", (c) => {
 });
 
 app.use("/api/*", cors());
+
+/**
+ * OpenCode UI calls /api/* at host root (e.g. /api/health). That collides with the
+ * runner control-plane. If the browser has oc_run and is NOT presenting the runner
+ * bearer token, proxy to the container. Runner routes (/api/runs*, /api/capabilities)
+ * and bearer-authenticated /api/health stay on the Worker.
+ */
+app.use("/api/*", async (c, next) => {
+  const path = new URL(c.req.url).pathname;
+  const isRunnerExclusive =
+    path === "/api/runs" ||
+    path.startsWith("/api/runs/") ||
+    path === "/api/capabilities";
+  if (isRunnerExclusive) return next();
+
+  const hasRunnerBearer = requireRunnerAuth(c);
+  if (path === "/api/health" && hasRunnerBearer) return next();
+
+  const sticky = sanitizeRunId(parseCookies(c.req.header("Cookie"))[OC_RUN_COOKIE] || "");
+  if (sticky) {
+    return proxyToRun(c.env, sticky, c.req.raw, {
+      setStickyCookie: true,
+      rewriteHtml: false,
+    });
+  }
+  return next();
+});
 
 /** Control-plane health for harness-router (no container). */
 app.get("/api/health", async (c) => {
