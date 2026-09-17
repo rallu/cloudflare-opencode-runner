@@ -1,10 +1,10 @@
 # OpenCode Cloudflare runner ↔ Dugongi Harness Router
 
-**Decision (2026-09-16):** Keep Rubikc CF OpenCode runner for Linear UI links. Do not use harnessrouter.ai for this UX (no shareable OpenCode UI).
+**Decision (2026-09-16):** Keep the Cloudflare OpenCode runner for Linear UI links. Do not use harnessrouter.ai for this UX (no shareable OpenCode UI).
 
 ## Backend (already live)
 
-- Base: `https://opencode-server.rubikc.workers.dev`
+- Base: `https://opencode-runner.<your-subdomain>.workers.dev`
 - Mode: one Cloudflare Container per run (`max_instances=8`, idle sleep **2h** (HTTP activity, not wall-clock from start), soft ~4h stop; destroy via DELETE)
 - Front door: Cloudflare Access (human browser login for UI)
 - Automation API: `/api/runs*` (optional `Authorization: Bearer $RUNNER_API_TOKEN` if secret set)
@@ -52,17 +52,17 @@ Response `201`:
   "runId": "...",
   "sleepAfter": "2h",
   "workBranch": "opencode/<runId>",
-  "url": "https://opencode-server.rubikc.workers.dev/r/<runId>/<cn(dir)>/session/<sessionId>",
-  "openCodeUrl": "https://opencode-server.rubikc.workers.dev/r/<runId>/<cn(dir)>/session/<sessionId>",
+  "url": "https://opencode-runner.<your-subdomain>.workers.dev/r/<runId>/<cn(dir)>/session/<sessionId>",
+  "openCodeUrl": "https://opencode-runner.<your-subdomain>.workers.dev/r/<runId>/<cn(dir)>/session/<sessionId>",
   "sessionId": "ses_…",
   "promptAccepted": true,
   "autoPR": true,
   "autoPRApplied": true,
   "prompt": { "ok": true, "sessionId": "ses_…", "promptAccepted": true, "directory": "/home/dev/repo" },
   "links": {
-    "ui": "https://opencode-server.rubikc.workers.dev/r/<runId>/<cn(dir)>/session/<sessionId>",
-    "health": "https://opencode-server.rubikc.workers.dev/r/<runId>/global/health",
-    "openapi": "https://opencode-server.rubikc.workers.dev/r/<runId>/doc"
+    "ui": "https://opencode-runner.<your-subdomain>.workers.dev/r/<runId>/<cn(dir)>/session/<sessionId>",
+    "health": "https://opencode-runner.<your-subdomain>.workers.dev/r/<runId>/global/health",
+    "openapi": "https://opencode-runner.<your-subdomain>.workers.dev/r/<runId>/doc"
   }
 }
 ```
@@ -80,7 +80,7 @@ Container ready still returns `success: true` even if session/prompt fails; chec
 
 ### Human UI
 
-- Share `openCodeUrl` in Linear. Humans open it; Cloudflare Access prompts login (e.g. juha-pekka.rajaniemi@rubikc.com policy).
+- Share `openCodeUrl` in Linear. Humans open it; Cloudflare Access prompts login (configure an email allowlist for your team).
 - Service token is for harness-router API calls only; do not put secrets in Linear.
 
 ## What harness-router.dugongi.com should implement
@@ -99,7 +99,7 @@ Mirror Cursor harness templates:
 
 ## Cloudflare Access setup (dashboard — API token lacked Access create)
 
-1. Zero Trust → Access → Applications → app covering `opencode-server.rubikc.workers.dev`.
+1. Zero Trust → Access → Applications → app covering `opencode-runner.<your-subdomain>.workers.dev`.
 2. Create **Service Token** for harness-router.
 3. Add Access policy allowing that service token for `/api/*` (and optionally keep email policy for UI paths `/r/*`).
 4. Prefer splitting policies: service token for `/api/*`; browser email for `/r/*` and `/admin`.

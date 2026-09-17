@@ -164,7 +164,7 @@ Do not call `/api/runs` from the browser admin — it returns 401 without the ru
 
 ## License
 
-MIT © Dugongi / Juha-Pekka Rajaniemi
+MIT © Dugongi
 
 ## Related
 
