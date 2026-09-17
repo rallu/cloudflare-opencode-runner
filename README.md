@@ -2,7 +2,7 @@
 
 **Per-run OpenCode servers on Cloudflare Containers**, built for [Harness Router](https://harness-router.dugongi.com/) by [Dugongi](https://dugongi.com/).
 
-When Harness Router delegates a Linear issue to OpenCode, this Worker spins up an **isolated container** for that run, clones the repo, and exposes an OpenCode UI link. Idle containers **sleep** after **30 minutes**; soft max lifetime (default **4 hours**) **stops** the container but keeps the run id so it can be started again. **Destroy only** on explicit `DELETE /api/runs/:id` (harness cancel/archive/merge) or admin destroy — not on the default TTL alarm.
+When Harness Router delegates a Linear issue to OpenCode, this Worker spins up an **isolated container** for that run, clones the repo, and exposes an OpenCode UI link. Idle containers **sleep** after **2 hours** of no HTTP activity (not wall-clock from start); soft max lifetime (default **4 hours**) **stops** the container but keeps the run id so it can be started again. Disk is ephemeral — resume via git work branch `opencode/<runId>` (agent must push; wake restores from remote). **Destroy only** on explicit `DELETE /api/runs/:id` (harness cancel/archive/merge) or admin destroy — not on the default TTL alarm.
 
 > Not affiliated with the separate open-source project at [`HarnessRouter/harnessrouter`](https://github.com/HarnessRouter/harnessrouter). This repo is the OpenCode runner for **Harness Router** by Dugongi.
 
@@ -12,7 +12,8 @@ When Harness Router delegates a Linear issue to OpenCode, this Worker spins up a
 - **UI link for humans** — `https://<worker>/r/<runId>/…/session/…` when auto-prompted (else `/r/<runId>/`; Access-protected)
 - **Automation API** — `POST /api/runs` returns `openCodeUrl` for Linear comments
 - **Low concurrency** — default `max_instances = 8` (see `wrangler.toml`)
-- **Idle sleep** — `sleepAfter = 30m` (container stops; DO / run id retained; `POST …/start` wakes it)
+- **Idle sleep** — `sleepAfter = 2h` (HTTP activity timeout; container stops; DO / run id retained; `POST …/start` wakes it)
+- **Git-as-volume resume** — deterministic `workBranch` `opencode/<runId>`; agent pushes after changes; wake checks out that remote branch (chat history still lost on sleep)
 - **Soft lifetime** — `maxLifetimeMs` / `MAX_RUN_LIFETIME_MS` (default 4h) stops the run on alarm; set `hardDestroyOnExpiry: true` only if you want TTL to destroy
 - **Destroy** — `DELETE /api/runs/:id` (or admin destroy); harness must DELETE on merge/cancel
 - **Curated Ubuntu coding image** — `ubuntu:24.04` (linux/amd64) with Node, Python/uv, Go, Rust, Java 21, gh, ripgrep, and more (see below)
@@ -91,7 +92,8 @@ Optional fields:
 - **`setup`** — shell commands in the first cloned repo after clone, before OpenCode starts. A failing command fails startup (surfaces in bootstrap error / crash log).
 - **`prompt`** — after the container is ready, auto-create a session and `prompt_async`. Default model is `opencode` / `big-pickle` when omitted. Response includes `sessionId`, `promptAccepted`, and `prompt: { ok, sessionId, error? }`. Session failures do not mark the run as failed (`success: true` if the container is ready).
 - **`agent`** — OpenCode agent name (e.g. `build`, `plan`). Passed into session create and `prompt_async`.
-- **`autoPR`** / **`autoCreatePR`** — when `true` and agent is not `plan`, appends draft-PR instructions (`gh pr create --draft`) to the prompt. Plan mode skips this (`autoPRApplied: false`, `autoPRSkippedReason: "plan-mode"`). Response echoes `autoPR` and `autoPRApplied`.
+- **`autoPR`** / **`autoCreatePR`** — when `true` and agent is not `plan`, appends draft-PR instructions (`gh pr create --draft` from the same `workBranch`) to the prompt. Plan mode skips this (`autoPRApplied: false`, `autoPRSkippedReason: "plan-mode"`). Response echoes `autoPR`, `autoPRApplied`, `workBranch`, and `sleepAfter`.
+- **Work branch** — every run with a prompt (non-plan) gets a standing instruction to commit + `git push -u origin opencode/<runId>` after code changes so wake can restore the tree.
 
 Response includes `openCodeUrl` / `url` — when a prompt auto-starts a session this is a **session deep link** (`/r/<runId>/<cn(dir)>/session/<sessionId>`); otherwise `/r/<runId>/`. Opening either shows the chat (document entry 302s to the session when meta has `sessionId`+`directory`). Put that link in Linear.
 
@@ -101,7 +103,7 @@ Response includes `openCodeUrl` / `url` — when a prompt auto-starts a session 
 - `POST /api/runs/:runId/start` — wake a stopped/slept run
 - `POST /api/runs/:runId/stop` — sleep/stop (keep run id)
 - `DELETE /api/runs/:runId` — **only** hard destroy; call on Linear cancel/archive or after GitHub merge
-- Idle inactivity uses `sleepAfter=30m`. Soft `maxLifetimeMs` stops the container; it does **not** destroy unless `hardDestroyOnExpiry: true`.
+- Idle inactivity uses `sleepAfter=2h` (HTTP requests reset the timer). Soft `maxLifetimeMs` stops the container; it does **not** destroy unless `hardDestroyOnExpiry: true`. On wake, `startup.sh` restores `WORK_BRANCH` from origin when present.
 
 ### OpenCode session API
 
@@ -137,7 +139,7 @@ Always build with `--platform=linux/amd64` (Wrangler/Containers does this for th
 |--------|--------|---------|
 | `max_instances` | `wrangler.toml` | `8` |
 | `instance_type` | `wrangler.toml` | `standard-2` (12GB disk) |
-| `sleepAfter` | `OpenCodeRunner` in `src/index.ts` | `30m` (idle → sleep) |
+| `sleepAfter` | `OpenCodeRunner` in `src/index.ts` | `2h` (idle HTTP → sleep) |
 | `MAX_RUN_LIFETIME_MS` | `wrangler.toml` `[vars]` | `14400000` (4h **soft** stop) |
 | `hardDestroyOnExpiry` | `POST /api/runs` body | `false` (TTL does not destroy) |
 | `OPENCODE_API_KEY` | secret | required |

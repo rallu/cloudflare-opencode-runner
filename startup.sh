@@ -6,6 +6,7 @@ mkdir -p /tmp
 : > /tmp/opencode.log
 echo "startup.sh begin $(date -Iseconds 2>/dev/null || date) run=${RUN_ID:-none}" >> /tmp/opencode.log
 echo "PATH=$PATH" >> /tmp/opencode.log
+echo "RUN_BRANCH=${RUN_BRANCH:-} WORK_BRANCH=${WORK_BRANCH:-}" >> /tmp/opencode.log
 echo "which opencode: $(command -v opencode || echo MISSING)" >> /tmp/opencode.log
 echo "which node: $(command -v node || echo MISSING)" >> /tmp/opencode.log
 
@@ -21,15 +22,76 @@ if [ -n "$GIT_REPOS" ]; then
     repo_name=$(basename "$repo" .git)
     if [ ! -d "$repo_name" ]; then
       echo "Cloning $repo..." >> /tmp/opencode.log
+      # Prefer base RUN_BRANCH when set; fall back to default branch.
       if [ -n "$RUN_BRANCH" ]; then
-        git clone --branch "$RUN_BRANCH" --single-branch "$repo" "$repo_name" >> /tmp/opencode.log 2>&1 || git clone "$repo" "$repo_name" >> /tmp/opencode.log 2>&1 || echo "Failed to clone $repo" >> /tmp/opencode.log
+        git clone --branch "$RUN_BRANCH" --single-branch "$repo" "$repo_name" >> /tmp/opencode.log 2>&1 \
+          || git clone "$repo" "$repo_name" >> /tmp/opencode.log 2>&1 \
+          || echo "Failed to clone $repo" >> /tmp/opencode.log
       else
         git clone "$repo" "$repo_name" >> /tmp/opencode.log 2>&1 || echo "Failed to clone $repo" >> /tmp/opencode.log
       fi
     fi
-    if [ -n "$RUN_BRANCH" ] && [ -d "$repo_name" ]; then
-      (cd "$repo_name" && git fetch origin "$RUN_BRANCH" && git checkout "$RUN_BRANCH") >> /tmp/opencode.log 2>&1 || true
+
+    if [ -d "$repo_name" ]; then
+      (
+        cd "$repo_name" || exit 0
+        echo "git fetch origin in $repo_name" >> /tmp/opencode.log
+        git fetch origin >> /tmp/opencode.log 2>&1 || true
+
+        # Resolve base ref: RUN_BRANCH if set, else origin's default branch.
+        checkout_base() {
+          if [ -n "$RUN_BRANCH" ]; then
+            if git rev-parse --verify "refs/remotes/origin/${RUN_BRANCH}" >/dev/null 2>&1; then
+              git checkout -B "$RUN_BRANCH" "origin/${RUN_BRANCH}" >> /tmp/opencode.log 2>&1
+              return $?
+            fi
+            git checkout "$RUN_BRANCH" >> /tmp/opencode.log 2>&1
+            return $?
+          fi
+          local def
+          def="$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')" || def=""
+          if [ -n "$def" ] && git rev-parse --verify "refs/remotes/origin/${def}" >/dev/null 2>&1; then
+            git checkout -B "$def" "origin/${def}" >> /tmp/opencode.log 2>&1
+            return $?
+          fi
+          if git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1; then
+            git checkout -B main origin/main >> /tmp/opencode.log 2>&1
+            return $?
+          fi
+          if git rev-parse --verify refs/remotes/origin/master >/dev/null 2>&1; then
+            git checkout -B master origin/master >> /tmp/opencode.log 2>&1
+            return $?
+          fi
+          return 0
+        }
+
+        if [ -n "$WORK_BRANCH" ]; then
+          if git rev-parse --verify "refs/remotes/origin/${WORK_BRANCH}" >/dev/null 2>&1; then
+            echo "Restoring work branch from origin/${WORK_BRANCH}" >> /tmp/opencode.log
+            if git checkout -B "$WORK_BRANCH" "origin/${WORK_BRANCH}" >> /tmp/opencode.log 2>&1; then
+              echo "Restored work branch: ${WORK_BRANCH} (from remote)" >> /tmp/opencode.log
+            else
+              git checkout "$WORK_BRANCH" >> /tmp/opencode.log 2>&1 || true
+              git pull --ff-only origin "$WORK_BRANCH" >> /tmp/opencode.log 2>&1 || true
+              echo "Checked out work branch: ${WORK_BRANCH} (fallback)" >> /tmp/opencode.log
+            fi
+          else
+            echo "origin/${WORK_BRANCH} not found; creating from base (RUN_BRANCH=${RUN_BRANCH:-default})" >> /tmp/opencode.log
+            checkout_base || true
+            git checkout -B "$WORK_BRANCH" >> /tmp/opencode.log 2>&1 || true
+            echo "Created local work branch: ${WORK_BRANCH}" >> /tmp/opencode.log
+          fi
+        else
+          # No WORK_BRANCH — stay on / check out base only.
+          checkout_base || true
+          echo "No WORK_BRANCH; on base $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)" >> /tmp/opencode.log
+        fi
+
+        echo "Active branch: $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)" >> /tmp/opencode.log
+        echo "HEAD: $(git rev-parse --short HEAD 2>/dev/null || echo unknown)" >> /tmp/opencode.log
+      )
     fi
+
     if [ -z "$FIRST_REPO_DIR" ] && [ -d "$repo_name" ]; then
       FIRST_REPO_DIR="/home/dev/$repo_name"
     fi
@@ -63,9 +125,9 @@ if [ -n "$SETUP_COMMANDS" ]; then
       exit 1
     fi
     echo "SETUP_COMMAND ok: $_cmd" >> /tmp/opencode.log
-  done <<EOF
+  done <<EOFINNER
 ${_setup_raw}
-EOF
+EOFINNER
   echo "SETUP_COMMANDS finished successfully" >> /tmp/opencode.log
 fi
 

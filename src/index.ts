@@ -20,7 +20,10 @@ interface Env {
 type RunMeta = {
   runId: string;
   repo?: string;
+  /** Base / starting branch from the create request (RUN_BRANCH). */
   branch?: string;
+  /** Deterministic per-run work branch the agent must push (WORK_BRANCH). */
+  workBranch?: string;
   /** Post-clone shell commands (first repo). Also passed as SETUP_COMMANDS env. */
   setup?: string[];
   createdAt: number;
@@ -91,6 +94,13 @@ function json(data: unknown, status = 200): Response {
 function sanitizeRunId(runId: string): string | null {
   if (!/^[A-Za-z0-9._-]{1,128}$/.test(runId)) return null;
   return runId;
+}
+
+/** Deterministic work branch: opencode/<sanitized-runId> (safe chars only). */
+export function workBranchName(runId: string): string {
+  const safe =
+    runId.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^-+|-+$/g, "").slice(0, 120) || "run";
+  return `opencode/${safe}`;
 }
 
 function emptyCapabilities(error?: string): RunnerCapabilities {
@@ -368,58 +378,110 @@ export type PromptResult = {
   error?: string;
 };
 
-const AUTO_PR_INSTRUCTION = `
+function standingPushInstruction(workBranch: string): string {
+  return `
+
+---
+WORK BRANCH / PERSISTENCE (required after code changes):
+- Use git branch \`${workBranch}\` (env WORK_BRANCH; already checked out when present).
+- After any code changes: commit and \`git push -u origin ${workBranch}\`.
+- Container disk is ephemeral on sleep — wake restores from this remote work branch.
+- Not required in plan/read-only mode (no code changes / no push).
+`;
+}
+
+function autoPrInstruction(workBranch: string, baseBranch?: string): string {
+  const base = (baseBranch && baseBranch.trim()) || "main";
+  return `
 
 ---
 AUTO_PR (required):
 After you finish the requested work (code changes complete), create a draft pull request:
-1. Create/switch to a new branch named for the change (not main/master).
+1. Use the existing work branch \`${workBranch}\` (do not invent a random branch name).
 2. Commit your changes with a clear message.
-3. Push the branch.
-4. Open a **draft** PR with \`gh pr create --draft\` (title + body summarizing the change). Prefer draft over ready-for-review.
+3. Push: \`git push -u origin ${workBranch}\`.
+4. Open a **draft** PR with \`gh pr create --draft --base ${base} --head ${workBranch}\` (title + body summarizing the change). Prefer draft over ready-for-review.
 5. Reply with the PR URL when done.
 Do this only after the task work is done — not before.
 `;
+}
 
 export type AutoPrAugmentResult = {
   prompt: string;
   autoPR: boolean;
   autoPRApplied: boolean;
   autoPRSkippedReason?: "plan-mode";
+  pushInstructionApplied: boolean;
 };
 
-/** Append draft-PR instructions when autoPR is on and agent is not plan mode. */
+export type AugmentPromptOpts = {
+  autoPR: boolean;
+  agent?: string;
+  workBranch: string;
+  baseBranch?: string;
+};
+
+/**
+ * Standing push instruction whenever there is a prompt (build/default).
+ * Plan mode is read-only: no push / no autoPR append.
+ * autoPR reuses the same work branch (no random branch names).
+ */
+export function augmentPromptForRun(
+  prompt: string,
+  opts: AugmentPromptOpts,
+): AutoPrAugmentResult {
+  const isPlanMode = (opts.agent || "").trim().toLowerCase() === "plan";
+  const wantAutoPR = opts.autoPR === true;
+
+  if (!prompt) {
+    return {
+      prompt,
+      autoPR: wantAutoPR,
+      autoPRApplied: false,
+      pushInstructionApplied: false,
+      ...(wantAutoPR && isPlanMode ? { autoPRSkippedReason: "plan-mode" as const } : {}),
+    };
+  }
+
+  if (isPlanMode) {
+    return {
+      prompt,
+      autoPR: wantAutoPR,
+      autoPRApplied: false,
+      pushInstructionApplied: false,
+      ...(wantAutoPR ? { autoPRSkippedReason: "plan-mode" as const } : {}),
+    };
+  }
+
+  let out = prompt + standingPushInstruction(opts.workBranch);
+  let autoPRApplied = false;
+  if (wantAutoPR) {
+    out += autoPrInstruction(opts.workBranch, opts.baseBranch);
+    autoPRApplied = true;
+  }
+  return {
+    prompt: out,
+    autoPR: wantAutoPR,
+    autoPRApplied,
+    pushInstructionApplied: true,
+  };
+}
+
+/** @deprecated Prefer augmentPromptForRun (includes standing push + work branch). */
 export function applyAutoPrToPrompt(
   prompt: string,
   autoPR: boolean,
   agent?: string,
+  workBranch = "opencode/run",
+  baseBranch?: string,
 ): AutoPrAugmentResult {
-  const isPlanMode = (agent || "").trim().toLowerCase() === "plan";
-  if (!autoPR) {
-    return { prompt, autoPR: false, autoPRApplied: false };
-  }
-  if (isPlanMode) {
-    return {
-      prompt,
-      autoPR: true,
-      autoPRApplied: false,
-      autoPRSkippedReason: "plan-mode",
-    };
-  }
-  if (!prompt) {
-    return { prompt, autoPR: true, autoPRApplied: false };
-  }
-  return {
-    prompt: prompt + AUTO_PR_INSTRUCTION,
-    autoPR: true,
-    autoPRApplied: true,
-  };
+  return augmentPromptForRun(prompt, { autoPR, agent, workBranch, baseBranch });
 }
 
 export class OpenCodeRunner extends Container<Env> {
   defaultPort = 4096;
   // Idle → sleep/stop (keep DO / run id). Destroy only via DELETE (or hardDestroyOnExpiry).
-  sleepAfter = "30m";
+  sleepAfter = "2h";
   enableInternet = true;
   // Required: empty entrypoint from the Containers runtime would clear the image ENTRYPOINT
   // and the instance exits immediately with "container just exited".
@@ -438,6 +500,9 @@ export class OpenCodeRunner extends Container<Env> {
   private buildEnvVars(meta: RunMeta | null): Record<string, string> {
     const repo = meta?.repo?.trim();
     const branch = meta?.branch?.trim();
+    const workBranch =
+      meta?.workBranch?.trim() ||
+      (meta?.runId ? workBranchName(meta.runId) : "");
     let gitRepos = repo || this.env.GIT_REPOS || "";
     const setupCmds = (meta?.setup || []).map((c) => String(c).trim()).filter(Boolean);
     return {
@@ -447,7 +512,10 @@ export class OpenCodeRunner extends Container<Env> {
       GIT_REPOS: gitRepos,
       GIT_TOKEN: this.env.GIT_TOKEN || "",
       RUN_ID: meta?.runId || "",
+      // Base / starting ref from the create request.
       RUN_BRANCH: branch || "",
+      // Deterministic per-run work branch the agent must push; startup restores from it on wake.
+      WORK_BRANCH: workBranch,
       // Prefer ||| — container env may not preserve newlines. startup.sh splits on ||| and newlines.
       SETUP_COMMANDS: setupCmds.join("|||"),
     };
@@ -809,10 +877,12 @@ export class OpenCodeRunner extends Container<Env> {
     const createdAt = Date.now();
     const expiresAt = createdAt + maxLifetimeMs;
 
+    const workBranch = workBranchName(runId);
     const meta: RunMeta = {
       runId,
       repo: body.repo,
       branch: body.branch,
+      workBranch,
       setup,
       createdAt,
       expiresAt,
@@ -899,7 +969,12 @@ export class OpenCodeRunner extends Container<Env> {
 
       let prompt: PromptResult | undefined;
       const promptText = typeof body.prompt === "string" ? body.prompt.trim() : "";
-      const autoPr = applyAutoPrToPrompt(promptText, wantAutoPR, body.agent);
+      const autoPr = augmentPromptForRun(promptText, {
+        autoPR: wantAutoPR,
+        agent: body.agent,
+        workBranch,
+        baseBranch: body.branch,
+      });
       if (autoPr.prompt) {
         prompt = await this.autoCreateSessionAndPrompt({
           repo: body.repo,
@@ -922,9 +997,13 @@ export class OpenCodeRunner extends Container<Env> {
         createdAt,
         expiresAt,
         expiresAtIso: new Date(expiresAt).toISOString(),
+        sleepAfter: this.sleepAfter,
+        workBranch,
+        branch: body.branch || null,
         capabilities,
         autoPR: autoPr.autoPR,
         autoPRApplied: autoPr.autoPRApplied,
+        pushInstructionApplied: autoPr.pushInstructionApplied,
         ...(autoPr.autoPRSkippedReason
           ? { autoPRSkippedReason: autoPr.autoPRSkippedReason }
           : {}),
@@ -1471,7 +1550,7 @@ app.get("/worker-health", (c) => {
     mode: "per-run",
     maxInstances: 4,
     maxLifetimeMs: Number(c.env.MAX_RUN_LIFETIME_MS || FOUR_HOURS_MS),
-    sleepAfter: "30m",
+    sleepAfter: "2h",
     destroyPolicy: "explicit-delete",
     timestamp: new Date().toISOString(),
   });

@@ -5,7 +5,7 @@
 ## Backend (already live)
 
 - Base: `https://opencode-server.rubikc.workers.dev`
-- Mode: one Cloudflare Container per run (`max_instances=8`, idle sleep 30m, soft ~4h stop; destroy via DELETE)
+- Mode: one Cloudflare Container per run (`max_instances=8`, idle sleep **2h** (HTTP activity, not wall-clock from start), soft ~4h stop; destroy via DELETE)
 - Front door: Cloudflare Access (human browser login for UI)
 - Automation API: `/api/runs*` (optional `Authorization: Bearer $RUNNER_API_TOKEN` if secret set)
 
@@ -39,16 +39,19 @@ Body (all optional):
 
 - `setup`: shell commands run in the first cloned repo **after clone, before** `opencode serve`. Failure fails container startup (bootstrap error).
 - `prompt`: if set, after OpenCode is ready the runner creates a session and calls `prompt_async` (default model `opencode` / `big-pickle`).
-- `autoPR` / `autoCreatePR`: optional boolean (default false). When true and `agent` is **not** `"plan"`, the runner appends draft-PR instructions (`gh pr create --draft` on a new branch after the task). Cursor alias `autoCreatePR` is accepted the same way. In plan mode (`agent: "plan"`), autoPR is **skipped** (`autoPRApplied: false`, `autoPRSkippedReason: "plan-mode"`).
+- `autoPR` / `autoCreatePR`: optional boolean (default false). When true and `agent` is **not** `"plan"`, the runner appends draft-PR instructions (`gh pr create --draft` from the **same** work branch after the task). Cursor alias `autoCreatePR` is accepted the same way. In plan mode (`agent: "plan"`), autoPR is **skipped** (`autoPRApplied: false`, `autoPRSkippedReason: "plan-mode"`).
 - `maxLifetimeMs`: soft lifetime — on expiry the runner **stops/sleeps** (keeps run id / DO). Does **not** destroy by default.
 - `hardDestroyOnExpiry`: optional; if `true`, TTL alarm calls destroy. Prefer leaving false and `DELETE` on merge.
-- Idle: container `sleepAfter=30m`.
+- Idle: container `sleepAfter=2h` (resets on **HTTP requests** to the container, not CPU/wall-clock from start).
+- **Git-as-volume resume:** each run gets a deterministic `workBranch` = `opencode/<runId>`. On every start/wake, `startup.sh` restores from `origin/$WORK_BRANCH` if it exists; otherwise checks out the base `branch`/`main` and creates the work branch locally. Agent must `git push -u origin <workBranch>` after code changes (standing prompt instruction; not required in plan mode). Disk remains ephemeral; chat history is still lost on sleep.
 - Port-ready wait is 300s so slow `npm install` can finish before serve starts.
 
 Response `201`:
 ```json
 {
   "runId": "...",
+  "sleepAfter": "2h",
+  "workBranch": "opencode/<runId>",
   "url": "https://opencode-server.rubikc.workers.dev/r/<runId>/<cn(dir)>/session/<sessionId>",
   "openCodeUrl": "https://opencode-server.rubikc.workers.dev/r/<runId>/<cn(dir)>/session/<sessionId>",
   "sessionId": "ses_…",
