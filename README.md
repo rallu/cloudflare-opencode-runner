@@ -81,13 +81,17 @@ Content-Type: application/json
   "setup": ["npm install"],
   "prompt": "Fix the failing test and open a PR.",
   "title": "ENG-142",
-  "model": { "providerID": "opencode", "modelID": "big-pickle" }
+  "model": { "providerID": "opencode", "modelID": "big-pickle" },
+  "agent": "build",
+  "autoPR": true
 }
 ```
 
 Optional fields:
 - **`setup`** — shell commands in the first cloned repo after clone, before OpenCode starts. A failing command fails startup (surfaces in bootstrap error / crash log).
 - **`prompt`** — after the container is ready, auto-create a session and `prompt_async`. Default model is `opencode` / `big-pickle` when omitted. Response includes `sessionId`, `promptAccepted`, and `prompt: { ok, sessionId, error? }`. Session failures do not mark the run as failed (`success: true` if the container is ready).
+- **`agent`** — OpenCode agent name (e.g. `build`, `plan`). Passed into session create and `prompt_async`.
+- **`autoPR`** / **`autoCreatePR`** — when `true` and agent is not `plan`, appends draft-PR instructions (`gh pr create --draft`) to the prompt. Plan mode skips this (`autoPRApplied: false`, `autoPRSkippedReason: "plan-mode"`). Response echoes `autoPR` and `autoPRApplied`.
 
 Response includes `openCodeUrl` / `url` — when a prompt auto-starts a session this is a **session deep link** (`/r/<runId>/<cn(dir)>/session/<sessionId>`); otherwise `/r/<runId>/`. Opening either shows the chat (document entry 302s to the session when meta has `sessionId`+`directory`). Put that link in Linear.
 

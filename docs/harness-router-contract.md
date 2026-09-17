@@ -32,12 +32,14 @@ Body (all optional):
   "prompt": "Implement the issue…",
   "title": "ENG-142",
   "model": { "providerID": "opencode", "modelID": "big-pickle" },
-  "agent": "build"
+  "agent": "build",
+  "autoPR": true
 }
 ```
 
 - `setup`: shell commands run in the first cloned repo **after clone, before** `opencode serve`. Failure fails container startup (bootstrap error).
 - `prompt`: if set, after OpenCode is ready the runner creates a session and calls `prompt_async` (default model `opencode` / `big-pickle`).
+- `autoPR` / `autoCreatePR`: optional boolean (default false). When true and `agent` is **not** `"plan"`, the runner appends draft-PR instructions (`gh pr create --draft` on a new branch after the task). Cursor alias `autoCreatePR` is accepted the same way. In plan mode (`agent: "plan"`), autoPR is **skipped** (`autoPRApplied: false`, `autoPRSkippedReason: "plan-mode"`).
 - `maxLifetimeMs`: soft lifetime — on expiry the runner **stops/sleeps** (keeps run id / DO). Does **not** destroy by default.
 - `hardDestroyOnExpiry`: optional; if `true`, TTL alarm calls destroy. Prefer leaving false and `DELETE` on merge.
 - Idle: container `sleepAfter=30m`.
@@ -51,6 +53,8 @@ Response `201`:
   "openCodeUrl": "https://opencode-server.rubikc.workers.dev/r/<runId>/<cn(dir)>/session/<sessionId>",
   "sessionId": "ses_…",
   "promptAccepted": true,
+  "autoPR": true,
+  "autoPRApplied": true,
   "prompt": { "ok": true, "sessionId": "ses_…", "promptAccepted": true, "directory": "/home/dev/repo" },
   "links": {
     "ui": "https://opencode-server.rubikc.workers.dev/r/<runId>/<cn(dir)>/session/<sessionId>",

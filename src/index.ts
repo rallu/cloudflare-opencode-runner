@@ -37,6 +37,8 @@ type RunMeta = {
   sessionId?: string;
   /** Working directory used for the auto-prompt session (for UI deep links). */
   directory?: string;
+  /** Whether autoPR was requested at bootstrap (optional meta). */
+  autoPR?: boolean;
 };
 
 /** Cached OpenCode discovery for harness-router (no live instance required). */
@@ -366,6 +368,54 @@ export type PromptResult = {
   error?: string;
 };
 
+const AUTO_PR_INSTRUCTION = `
+
+---
+AUTO_PR (required):
+After you finish the requested work (code changes complete), create a draft pull request:
+1. Create/switch to a new branch named for the change (not main/master).
+2. Commit your changes with a clear message.
+3. Push the branch.
+4. Open a **draft** PR with \`gh pr create --draft\` (title + body summarizing the change). Prefer draft over ready-for-review.
+5. Reply with the PR URL when done.
+Do this only after the task work is done — not before.
+`;
+
+export type AutoPrAugmentResult = {
+  prompt: string;
+  autoPR: boolean;
+  autoPRApplied: boolean;
+  autoPRSkippedReason?: "plan-mode";
+};
+
+/** Append draft-PR instructions when autoPR is on and agent is not plan mode. */
+export function applyAutoPrToPrompt(
+  prompt: string,
+  autoPR: boolean,
+  agent?: string,
+): AutoPrAugmentResult {
+  const isPlanMode = (agent || "").trim().toLowerCase() === "plan";
+  if (!autoPR) {
+    return { prompt, autoPR: false, autoPRApplied: false };
+  }
+  if (isPlanMode) {
+    return {
+      prompt,
+      autoPR: true,
+      autoPRApplied: false,
+      autoPRSkippedReason: "plan-mode",
+    };
+  }
+  if (!prompt) {
+    return { prompt, autoPR: true, autoPRApplied: false };
+  }
+  return {
+    prompt: prompt + AUTO_PR_INSTRUCTION,
+    autoPR: true,
+    autoPRApplied: true,
+  };
+}
+
 export class OpenCodeRunner extends Container<Env> {
   defaultPort = 4096;
   // Idle → sleep/stop (keep DO / run id). Destroy only via DELETE (or hardDestroyOnExpiry).
@@ -624,6 +674,7 @@ export class OpenCodeRunner extends Container<Env> {
     return json({ success: true, capabilities });
   }
 
+
   private async autoCreateSessionAndPrompt(opts: {
     repo?: string;
     prompt: string;
@@ -647,7 +698,10 @@ export class OpenCodeRunner extends Container<Env> {
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ title }),
+            body: JSON.stringify({
+              title,
+              ...(opts.agent ? { agent: opts.agent } : {}),
+            }),
           },
         ),
         this.defaultPort,
@@ -733,6 +787,10 @@ export class OpenCodeRunner extends Container<Env> {
       model?: { providerID: string; modelID: string };
       agent?: string;
       setup?: string[];
+      /** Cursor-like: append draft-PR instructions after the task (skipped in plan mode). */
+      autoPR?: boolean;
+      /** Cursor alias for autoPR. */
+      autoCreatePR?: boolean;
     };
 
     const runId = sanitizeRunId(body.runId || "");
@@ -741,6 +799,8 @@ export class OpenCodeRunner extends Container<Env> {
     const setup = Array.isArray(body.setup)
       ? body.setup.map((c) => String(c)).filter((c) => c.trim())
       : undefined;
+
+    const wantAutoPR = body.autoPR === true || body.autoCreatePR === true;
 
     const maxLifetimeMs = Math.min(
       Math.max(Number(body.maxLifetimeMs || this.env.MAX_RUN_LIFETIME_MS || FOUR_HOURS_MS), 60_000),
@@ -758,6 +818,7 @@ export class OpenCodeRunner extends Container<Env> {
       expiresAt,
       hardDestroyOnExpiry: body.hardDestroyOnExpiry === true,
       status: "starting",
+      autoPR: wantAutoPR,
     };
     await this.saveMeta(meta);
     await this.scheduleExpiry(expiresAt);
@@ -838,10 +899,11 @@ export class OpenCodeRunner extends Container<Env> {
 
       let prompt: PromptResult | undefined;
       const promptText = typeof body.prompt === "string" ? body.prompt.trim() : "";
-      if (promptText) {
+      const autoPr = applyAutoPrToPrompt(promptText, wantAutoPR, body.agent);
+      if (autoPr.prompt) {
         prompt = await this.autoCreateSessionAndPrompt({
           repo: body.repo,
-          prompt: promptText,
+          prompt: autoPr.prompt,
           title: body.title,
           model: body.model,
           agent: body.agent,
@@ -861,6 +923,11 @@ export class OpenCodeRunner extends Container<Env> {
         expiresAt,
         expiresAtIso: new Date(expiresAt).toISOString(),
         capabilities,
+        autoPR: autoPr.autoPR,
+        autoPRApplied: autoPr.autoPRApplied,
+        ...(autoPr.autoPRSkippedReason
+          ? { autoPRSkippedReason: autoPr.autoPRSkippedReason }
+          : {}),
         ...(prompt
           ? {
               prompt,
@@ -1488,6 +1555,10 @@ export type CreateRunBody = {
   model?: { providerID: string; modelID: string };
   agent?: string;
   setup?: string[];
+  /** Cursor-like: append draft-PR instructions after the task (skipped in plan mode). */
+  autoPR?: boolean;
+  /** Cursor alias for autoPR — either true enables. */
+  autoCreatePR?: boolean;
 };
 
 /** Shared bootstrap for POST /api/runs (bearer) and POST /admin/api/create (Access). */
@@ -1515,6 +1586,7 @@ async function createRunResponse(
         model: body.model,
         agent: body.agent,
         setup: body.setup,
+        autoPR: body.autoPR === true || body.autoCreatePR === true,
       }),
     }),
   );
