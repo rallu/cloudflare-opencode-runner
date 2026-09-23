@@ -11,6 +11,8 @@ echo "which opencode: $(command -v opencode || echo MISSING)" >> /tmp/opencode.l
 echo "which node: $(command -v node || echo MISSING)" >> /tmp/opencode.log
 
 if [ -n "$GIT_TOKEN" ]; then
+  # `gh` reads GH_TOKEN; keep both names in sync from the Worker secret.
+  export GH_TOKEN="${GH_TOKEN:-$GIT_TOKEN}"
   git config --global url."https://x-access-token:${GIT_TOKEN}@github.com/".insteadOf "https://github.com/" >> /tmp/opencode.log 2>&1 || true
 fi
 FIRST_REPO_DIR=""

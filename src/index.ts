@@ -550,7 +550,9 @@ export class OpenCodeRunner extends Container<Env> {
       OPENCODE_DISABLE_AUTOUPDATE: "true",
       OPENCODE_API_KEY: this.env.OPENCODE_API_KEY || "",
       GIT_REPOS: gitRepos,
+      // Same secret under both names: clone tooling uses GIT_TOKEN; `gh` expects GH_TOKEN.
       GIT_TOKEN: this.env.GIT_TOKEN || "",
+      GH_TOKEN: this.env.GIT_TOKEN || "",
       RUN_ID: meta?.runId || "",
       // Base / starting ref from the create request.
       RUN_BRANCH: branch || "",

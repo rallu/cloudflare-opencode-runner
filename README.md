@@ -42,7 +42,7 @@ Linear → Harness Router → POST /api/runs → Cloudflare Worker
 ```bash
 npm install
 npx wrangler secret put OPENCODE_API_KEY
-npx wrangler secret put GIT_TOKEN          # optional, private repos
+npx wrangler secret put GIT_TOKEN          # optional, private repos (also exposed as GH_TOKEN for `gh`)
 npx wrangler secret put RUNNER_API_TOKEN   # optional but recommended for /api/runs
 npm run deploy
 ```
@@ -143,7 +143,7 @@ Always build with `--platform=linux/amd64` (Wrangler/Containers does this for th
 | `MAX_RUN_LIFETIME_MS` | `wrangler.toml` `[vars]` | `14400000` (4h **soft** stop) |
 | `hardDestroyOnExpiry` | `POST /api/runs` body | `false` (TTL does not destroy) |
 | `OPENCODE_API_KEY` | secret | required |
-| `GIT_TOKEN` | secret | optional |
+| `GIT_TOKEN` | secret | optional; also passed into the container as `GH_TOKEN` for `gh` |
 | `RUNNER_API_TOKEN` | secret | optional (if unset, rely on Access alone) |
 
 ## Browser admin vs automation API
