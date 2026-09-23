@@ -42,6 +42,11 @@ type RunMeta = {
   directory?: string;
   /** Whether autoPR was requested at bootstrap (optional meta). */
   autoPR?: boolean;
+  /**
+   * Ephemeral GitHub token for this run (App installation token preferred).
+   * Prefer over Worker GIT_TOKEN. Never expose in API JSON responses.
+   */
+  gitToken?: string;
 };
 
 /** Cached OpenCode discovery for harness-router (no live instance required). */
@@ -406,6 +411,26 @@ function withGitHubToken(repoUrl: string, token: string | undefined): string {
   return norm.replace(/^https:\/\/github\.com\//i, `https://x-access-token:${t}@github.com/`);
 }
 
+/** Prefer per-run ephemeral token (App installation) over Worker GIT_TOKEN. */
+function resolveGitToken(meta: RunMeta | null, env: Pick<Env, "GIT_TOKEN">): string {
+  const fromRun = (meta?.gitToken || "").trim();
+  if (fromRun) return fromRun;
+  return (env.GIT_TOKEN || "").trim();
+}
+
+/** Strip secrets before returning run meta over the API. */
+function publicRunMeta(
+  meta: RunMeta | null,
+): (Omit<RunMeta, "gitToken"> & { hasGitToken: boolean }) | null {
+  if (!meta) return null;
+  const { gitToken, ...rest } = meta;
+  return {
+    ...rest,
+    hasGitToken: !!(gitToken && gitToken.trim()),
+  };
+}
+
+
 function repoBasename(repo: string | undefined | null): string | null {
   if (!repo?.trim()) return null;
   const cleaned = repo.trim().replace(/\/+$/, "");
@@ -554,6 +579,8 @@ export class OpenCodeRunner extends Container<Env> {
     const workBranch =
       meta?.workBranch?.trim() ||
       (meta?.runId ? workBranchName(meta.runId) : "");
+    // Per-run App installation token (or request gitToken) wins over Worker GIT_TOKEN.
+    const gitToken = resolveGitToken(meta, this.env);
     // Normalize + embed x-access-token so live containers clone fine-grained PATs
     // even before startup.sh insteadOf is rebuilt into the image.
     const rawRepos = repo || this.env.GIT_REPOS || "";
@@ -562,7 +589,7 @@ export class OpenCodeRunner extends Container<Env> {
           .split(",")
           .map((r) => r.trim())
           .filter(Boolean)
-          .map((r) => withGitHubToken(normalizeGitHubRepoUrl(r), this.env.GIT_TOKEN))
+          .map((r) => withGitHubToken(normalizeGitHubRepoUrl(r), gitToken || undefined))
           .join(",")
       : "";
     const setupCmds = (meta?.setup || []).map((c) => String(c).trim()).filter(Boolean);
@@ -572,8 +599,8 @@ export class OpenCodeRunner extends Container<Env> {
       OPENCODE_API_KEY: this.env.OPENCODE_API_KEY || "",
       GIT_REPOS: gitRepos,
       // Same secret under both names: clone tooling uses GIT_TOKEN; `gh` expects GH_TOKEN.
-      GIT_TOKEN: this.env.GIT_TOKEN || "",
-      GH_TOKEN: this.env.GIT_TOKEN || "",
+      GIT_TOKEN: gitToken,
+      GH_TOKEN: gitToken,
       RUN_ID: meta?.runId || "",
       // Base / starting ref from the create request.
       RUN_BRANCH: branch || "",
@@ -679,7 +706,10 @@ export class OpenCodeRunner extends Container<Env> {
           return this.doBootstrap(request);
         case "/start":
           if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
-          return this.doStart();
+          return this.doStart(request);
+        case "/git-token":
+          if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
+          return this.doSetGitToken(request);
         case "/stop":
           if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
           return this.doStop();
@@ -994,6 +1024,10 @@ export class OpenCodeRunner extends Container<Env> {
       autoPR?: boolean;
       /** Cursor alias for autoPR. */
       autoCreatePR?: boolean;
+      /** Ephemeral GitHub App installation token (or PAT). Alias: ghToken. */
+      gitToken?: string;
+      /** Alias for gitToken (`gh` env name). */
+      ghToken?: string;
     };
 
     const runId = sanitizeRunId(body.runId || "");
@@ -1024,6 +1058,7 @@ export class OpenCodeRunner extends Container<Env> {
       hardDestroyOnExpiry: body.hardDestroyOnExpiry === true,
       status: "starting",
       autoPR: wantAutoPR,
+      gitToken: (body.gitToken || body.ghToken || "").trim() || undefined,
     };
     await this.saveMeta(meta);
     await this.scheduleExpiry(expiresAt);
@@ -1239,11 +1274,50 @@ export class OpenCodeRunner extends Container<Env> {
       sleepAfter: this.sleepAfter,
       defaultPort: this.defaultPort,
       enableInternet: this.enableInternet,
-      run: meta,
+      run: publicRunMeta(meta),
     });
   }
 
-  private async doStart(): Promise<Response> {
+
+  /** Refresh ephemeral GitHub token for wake / long runs (App installation tokens expire ~1h). */
+  private async doSetGitToken(request: Request): Promise<Response> {
+    const body = (await request.json().catch(() => ({}))) as {
+      gitToken?: string;
+      ghToken?: string;
+    };
+    const token = (body.gitToken || body.ghToken || "").trim();
+    if (!token) return json({ error: "gitToken required" }, 400);
+    const meta = await this.loadMeta();
+    if (!meta || meta.status === "destroyed") {
+      return json({ error: "Run not found" }, 404);
+    }
+    meta.gitToken = token;
+    await this.saveMeta(meta);
+    // Re-apply env for next start/wake; live container env is not mutated in-place.
+    this.envVars = this.buildEnvVars(meta);
+    return json({
+      success: true,
+      runId: meta.runId,
+      hasRunGitToken: true,
+      note: "Token stored for next start/wake. Live container env is unchanged until start/restart.",
+    });
+  }
+
+  private async doStart(request?: Request): Promise<Response> {
+    if (request) {
+      const body = (await request.json().catch(() => ({}))) as {
+        gitToken?: string;
+        ghToken?: string;
+      };
+      const token = (body.gitToken || body.ghToken || "").trim();
+      if (token) {
+        const existing = await this.loadMeta();
+        if (existing) {
+          existing.gitToken = token;
+          await this.saveMeta(existing);
+        }
+      }
+    }
     const meta = await this.applyEnvFromMeta();
     if (meta) {
       meta.status = "starting";
@@ -1326,6 +1400,7 @@ export class OpenCodeRunner extends Container<Env> {
     const meta = await this.loadMeta();
     if (meta) {
       meta.status = "destroyed";
+      meta.gitToken = undefined;
       await this.saveMeta(meta);
       await registryUpsert(this.env, {
         runId: meta.runId,
@@ -1409,7 +1484,9 @@ export class OpenCodeRunner extends Container<Env> {
       envVars: {
         GIT_REPOS: meta?.repo || this.env.GIT_REPOS || "",
         hasApiKey: !!this.env.OPENCODE_API_KEY,
-        hasGitToken: !!this.env.GIT_TOKEN,
+        hasGitToken: !!resolveGitToken(meta, this.env),
+        hasWorkerGitToken: !!this.env.GIT_TOKEN,
+        hasRunGitToken: !!(meta?.gitToken && meta.gitToken.trim()),
         auth: "cloudflare-access",
       },
       containerConfig: {
@@ -1420,7 +1497,7 @@ export class OpenCodeRunner extends Container<Env> {
         softExpiryPolicy: "stop",
         destroyPolicy: "explicit-delete-or-hardDestroyOnExpiry",
       },
-      run: meta,
+      run: publicRunMeta(meta),
     });
   }
 
@@ -1838,6 +1915,14 @@ export type CreateRunBody = {
   autoPR?: boolean;
   /** Cursor alias for autoPR — either true enables. */
   autoCreatePR?: boolean;
+  /**
+   * Ephemeral GitHub token for this run (App installation token preferred).
+   * Injected as GIT_TOKEN + GH_TOKEN; preferred over Worker GIT_TOKEN.
+   * Never logged or returned from GET status. Alias: ghToken.
+   */
+  gitToken?: string;
+  /** Alias for gitToken. */
+  ghToken?: string;
 };
 
 /** Shared bootstrap for POST /api/runs (bearer) and POST /admin/api/create (Access). */
@@ -1866,6 +1951,7 @@ async function createRunResponse(
         agent: body.agent,
         setup: body.setup,
         autoPR: body.autoPR === true || body.autoCreatePR === true,
+        gitToken: body.gitToken || body.ghToken,
       }),
     }),
   );
@@ -1931,7 +2017,30 @@ app.post("/api/runs/:runId/start", async (c) => {
   const runId = sanitizeRunId(c.req.param("runId"));
   if (!runId) return c.json({ error: "Invalid runId" }, 400);
   const container = getContainer(c.env.OPENCODE_CONTAINER, runId);
-  return container.fetch(new Request("http://localhost/__admin/start", { method: "POST" }));
+  const bodyText = await c.req.text().catch(() => "");
+  return container.fetch(
+    new Request("http://localhost/__admin/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: bodyText || "{}",
+    }),
+  );
+});
+
+/** Refresh ephemeral gitToken for an existing run (for wake / >1h App tokens). */
+app.post("/api/runs/:runId/git-token", async (c) => {
+  if (!requireRunnerAuth(c)) return c.json({ error: "Unauthorized" }, 401);
+  const runId = sanitizeRunId(c.req.param("runId"));
+  if (!runId) return c.json({ error: "Invalid runId" }, 400);
+  const container = getContainer(c.env.OPENCODE_CONTAINER, runId);
+  const bodyText = await c.req.text().catch(() => "");
+  return container.fetch(
+    new Request("http://localhost/__admin/git-token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: bodyText || "{}",
+    }),
+  );
 });
 
 app.post("/api/runs/:runId/stop", async (c) => {
@@ -2187,7 +2296,17 @@ app.all("/admin/api/:action", async (c) => {
       });
       return c.json({ ...status, openCodeUrl: url, url });
     }
-    if (["start", "stop", "restart", "refresh-capabilities"].includes(action)) {
+    if (action === "start" || action === "git-token") {
+      const bodyText = await c.req.text().catch(() => "");
+      return container.fetch(
+        new Request(`http://localhost/__admin/${action}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: bodyText || "{}",
+        }),
+      );
+    }
+    if (["stop", "restart", "refresh-capabilities"].includes(action)) {
       return container.fetch(new Request(`http://localhost/__admin/${action}`, { method: "POST" }));
     }
     if (action === "destroy") {

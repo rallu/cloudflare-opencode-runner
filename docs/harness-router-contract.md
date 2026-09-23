@@ -33,13 +33,15 @@ Body (all optional):
   "title": "ENG-142",
   "model": { "providerID": "opencode", "modelID": "big-pickle" },
   "agent": "build",
-  "autoPR": true
+  "autoPR": true,
+  "gitToken": "<github-app-installation-token>"
 }
 ```
 
 - `setup`: shell commands run in the first cloned repo **after clone, before** `opencode serve`. Failure fails container startup (bootstrap error).
 - `prompt`: if set, after OpenCode is ready the runner creates a session and calls `prompt_async` (default model `opencode` / `big-pickle`).
 - `autoPR` / `autoCreatePR`: optional boolean (default false). When true and `agent` is **not** `"plan"`, the runner appends draft-PR instructions (`gh pr create --draft` from the **same** work branch after the task). Cursor alias `autoCreatePR` is accepted the same way. In plan mode (`agent: "plan"`), autoPR is **skipped** (`autoPRApplied: false`, `autoPRSkippedReason: "plan-mode"`).
+- `gitToken` / `ghToken`: optional ephemeral GitHub token for this run (App installation token preferred). Preferred over Worker `GIT_TOKEN`. Injected as `GIT_TOKEN` + `GH_TOKEN`. Never returned from GET. Refresh via `POST /api/runs/:runId/git-token` (then start/restart) for runs past the ~1h installation-token TTL. Do not send the App private key.
 - `maxLifetimeMs`: soft lifetime — on expiry the runner **stops/sleeps** (keeps run id / DO). Does **not** destroy by default.
 - `hardDestroyOnExpiry`: optional; if `true`, TTL alarm calls destroy. Prefer leaving false and `DELETE` on merge.
 - Idle: container `sleepAfter=2h` (resets on **HTTP requests** to the container, not CPU/wall-clock from start).
@@ -73,8 +75,9 @@ Container ready still returns `success: true` even if session/prompt fails; chec
 
 ### Status / lifecycle
 
-- `GET /api/runs/:runId` → status + `openCodeUrl`
-- `POST /api/runs/:runId/start` → wake stopped/slept run
+- `GET /api/runs/:runId` → status + `openCodeUrl` (never includes `gitToken`)
+- `POST /api/runs/:runId/start` → wake stopped/slept run (optional `{ "gitToken" }` to refresh before wake)
+- `POST /api/runs/:runId/git-token` → store fresh ephemeral token for next start/wake
 - `POST /api/runs/:runId/stop` → sleep/stop (retain run id)
 - `DELETE /api/runs/:runId` → **destroy** container (required on cancel/archive/merge)
 
@@ -96,6 +99,17 @@ Mirror Cursor harness templates:
    - Prefer passing `prompt` (+ optional `setup`, `model`, `title`) on `POST /api/runs` so the runner auto-creates a session and starts the agent; otherwise leave human/agent to drive the UI (OpenAPI at `links.openapi`).
 4. **On cancel / archive / merge / failure:** `DELETE /api/runs/:runId` (required — TTL no longer auto-destroys by default).
 5. **Secrets (Doppler/env):** `OPENCODE_BASE_URL`, `OPENCODE_RUNNER_API_TOKEN`, `CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`.
+
+## GitHub App tokens (recommended)
+
+Harness Router should mint a **repository-scoped GitHub App installation token** and pass it as `gitToken` on `POST /api/runs`. Do not put a long-lived PAT or the App private key into the runner.
+
+1. Store App installation id in the GitHub integration (not a token).
+2. Mint installation token with Contents + Pull requests read/write for the target repo.
+3. Pass as `gitToken` (alias `ghToken`). Runner injects `GIT_TOKEN` + `GH_TOKEN`.
+4. Tokens expire ~1 hour: before wake or mid-run git ops past expiry, mint again and `POST /api/runs/:runId/git-token` then `POST .../start` (or pass `gitToken` on start). A live container’s env is not hot-reloaded.
+5. Worker `GIT_TOKEN` remains an optional admin/fallback secret only.
+
 
 ## Cloudflare Access setup (dashboard — API token lacked Access create)
 

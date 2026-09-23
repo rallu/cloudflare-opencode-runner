@@ -84,7 +84,8 @@ Content-Type: application/json
   "title": "ENG-142",
   "model": { "providerID": "opencode", "modelID": "big-pickle" },
   "agent": "build",
-  "autoPR": true
+  "autoPR": true,
+  "gitToken": "<github-app-installation-token>"
 }
 ```
 
@@ -93,14 +94,16 @@ Optional fields:
 - **`prompt`** — after the container is ready, auto-create a session and `prompt_async`. Default model is `opencode` / `big-pickle` when omitted. Response includes `sessionId`, `promptAccepted`, and `prompt: { ok, sessionId, error? }`. Session failures do not mark the run as failed (`success: true` if the container is ready).
 - **`agent`** — OpenCode agent name (e.g. `build`, `plan`). Passed into session create and `prompt_async`.
 - **`autoPR`** / **`autoCreatePR`** — when `true` and agent is not `plan`, appends draft-PR instructions (`gh pr create --draft` from the same `workBranch`) to the prompt. Plan mode skips this (`autoPRApplied: false`, `autoPRSkippedReason: "plan-mode"`). Response echoes `autoPR`, `autoPRApplied`, `workBranch`, and `sleepAfter`.
+- **`gitToken`** / **`ghToken`** — ephemeral GitHub token for this run (App installation token preferred). Injected as both `GIT_TOKEN` and `GH_TOKEN` in the container; **preferred over** the Worker `GIT_TOKEN` secret. Never returned from GET status. For runs longer than ~1h, mint a fresh token and call `POST /api/runs/:runId/git-token` then `POST .../start` (or pass `gitToken` on start).
 - **Work branch** — every run with a prompt (non-plan) gets a standing instruction to commit + `git push -u origin opencode/<runId>` after code changes so wake can restore the tree.
 
-Response includes `openCodeUrl` / `url` — with a `repo`, this is a **session deep link** (`/r/<runId>/<cn(dir)>/session/<sessionId>`) created even without `prompt`. Opening it shows the cloned project (not `$HOME`). Document entry `/r/<runId>/` 302s to that deep link. Put that link in Linear. Private repos need `GIT_TOKEN`.
+Response includes `openCodeUrl` / `url` — with a `repo`, this is a **session deep link** (`/r/<runId>/<cn(dir)>/session/<sessionId>`) created even without `prompt`. Opening it shows the cloned project (not `$HOME`). Document entry `/r/<runId>/` 302s to that deep link. Put that link in Linear. Private repos: pass `gitToken` from a GitHub App (recommended) or set Worker `GIT_TOKEN` as admin fallback.
 
 ### Status / lifecycle
 
 - `GET /api/runs/:runId`
-- `POST /api/runs/:runId/start` — wake a stopped/slept run
+- `POST /api/runs/:runId/start` — wake a stopped/slept run (optional body `{ "gitToken": "…" }` to refresh before wake)
+- `POST /api/runs/:runId/git-token` — store a fresh ephemeral token for the next start/wake
 - `POST /api/runs/:runId/stop` — sleep/stop (keep run id)
 - `DELETE /api/runs/:runId` — **only** hard destroy; call on Linear cancel/archive or after GitHub merge
 - Idle inactivity uses `sleepAfter=2h` (HTTP requests reset the timer). Soft `maxLifetimeMs` stops the container; it does **not** destroy unless `hardDestroyOnExpiry: true`. On wake, `startup.sh` restores `WORK_BRANCH` from origin when present.
@@ -143,7 +146,7 @@ Always build with `--platform=linux/amd64` (Wrangler/Containers does this for th
 | `MAX_RUN_LIFETIME_MS` | `wrangler.toml` `[vars]` | `14400000` (4h **soft** stop) |
 | `hardDestroyOnExpiry` | `POST /api/runs` body | `false` (TTL does not destroy) |
 | `OPENCODE_API_KEY` | secret | required |
-| `GIT_TOKEN` | secret | optional; also passed into the container as `GH_TOKEN` for `gh` |
+| `GIT_TOKEN` | secret | optional admin fallback; also as `GH_TOKEN`. Prefer per-run `gitToken` from a GitHub App |
 | `RUNNER_API_TOKEN` | secret | optional (if unset, rely on Access alone) |
 
 ## Browser admin vs automation API
