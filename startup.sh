@@ -102,9 +102,23 @@ fi
 # (project list includes the real project, not only global "/").
 if [ -n "$FIRST_REPO_DIR" ]; then
   echo "cd into worktree $FIRST_REPO_DIR before opencode serve" >> /tmp/opencode.log
-  cd "$FIRST_REPO_DIR" || echo "Failed to cd $FIRST_REPO_DIR" >> /tmp/opencode.log
+  cd "$FIRST_REPO_DIR" || {
+    echo "Failed to cd $FIRST_REPO_DIR" >> /tmp/opencode.log
+    echo "Failed to cd $FIRST_REPO_DIR" >&2
+    exit 1
+  }
+  printf '%s' "$FIRST_REPO_DIR" > /tmp/opencode-worktree
 elif [ -n "$GIT_REPOS" ]; then
-  echo "GIT_REPOS set but no cloned repo dir found; staying in $(pwd)" >> /tmp/opencode.log
+  # Do not start OpenCode from $HOME — the UI would show .cache/.config/.local/.npm
+  # and hide the missing project. Serve crash keep-alive so the Worker can read
+  # /tmp/opencode.log and report a clear clone/auth error.
+  echo "GIT_REPOS set but no cloned repo dir found; clone failed (check GIT_TOKEN for private repos)" >> /tmp/opencode.log
+  echo "GIT_REPOS set but no cloned repo dir found; clone failed (check GIT_TOKEN for private repos)" >&2
+  echo "Starting crash keep-alive on 4096 (clone failed)..." >> /tmp/opencode.log
+  if [ -f /home/dev/keepalive.js ]; then
+    exec node /home/dev/keepalive.js
+  fi
+  exec node -e 'require("http").createServer((q,s)=>{const u=(q.url||"/").split("?")[0];if(u==="/global/health"){s.writeHead(200,{"Content-Type":"application/json"});s.end(JSON.stringify({healthy:false,crash:true,cloneFailed:true}))}else if(u==="/__opencode-log"){s.writeHead(200,{"Content-Type":"text/plain"});try{s.end(require("fs").readFileSync("/tmp/opencode.log","utf8"))}catch(e){s.end(String(e))}}else{s.writeHead(503);s.end("clone failed")}}).listen(4096,"0.0.0.0");setInterval(()=>{},1<<30)'
 fi
 
 # Optional post-clone setup (e.g. npm install). Fail startup on non-zero so bootstrap surfaces errors.

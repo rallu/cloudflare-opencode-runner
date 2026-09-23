@@ -85,6 +85,13 @@ export function getAdminHTML(): string {
       return 'status-' + (status || 'unknown');
     }
 
+    async function openRunUi(runId, evt) {
+      if (evt) evt.preventDefault();
+      const data = await fetchJSON('/admin/api/status?runId=' + encodeURIComponent(runId));
+      const href = (data && (data.openCodeUrl || data.url)) || ('/r/' + encodeURIComponent(runId) + '/');
+      window.open(href, '_blank');
+    }
+
     async function loadRuns() {
       // Browser admin uses /admin/api/* only (Access cookie). Never call /api/runs (bearer).
       return fetchJSON('/admin/api/list');
@@ -118,7 +125,7 @@ export function getAdminHTML(): string {
                 \${r.error ? '<div class="text-xs text-red-400 mt-1 truncate" title="' + String(r.error).replace(/"/g,'&quot;') + '">' + r.error + '</div>' : ''}
               </div>
               <div class="flex gap-2 items-center">
-                <a href="\${ui}" target="_blank" onclick="event.stopPropagation()" class="text-xs bg-blue-700 hover:bg-blue-600 px-3 py-1 rounded">Open UI</a>
+                <a href="\${ui}" target="_blank" onclick="event.stopPropagation(); openRunUi('\${r.runId}', event)" class="text-xs bg-blue-700 hover:bg-blue-600 px-3 py-1 rounded">Open UI</a>
                 <button onclick="event.stopPropagation(); selectRun('\${r.runId}'); runAction('start')" class="text-xs bg-green-700 hover:bg-green-600 px-2 py-1 rounded">Start</button>
                 <button onclick="event.stopPropagation(); selectRun('\${r.runId}'); runAction('stop')" class="text-xs bg-yellow-700 hover:bg-yellow-600 px-2 py-1 rounded">Stop</button>
                 <button onclick="event.stopPropagation(); selectRun('\${r.runId}'); runAction('restart')" class="text-xs bg-orange-700 hover:bg-orange-600 px-2 py-1 rounded">Restart</button>
@@ -151,7 +158,13 @@ export function getAdminHTML(): string {
         statusDiv.innerHTML = '<p class="text-red-400">' + data.error + '</p>';
         return;
       }
-      const ui = '/r/' + encodeURIComponent(selectedRunId) + '/';
+      const ui = data.openCodeUrl || data.url || ('/r/' + encodeURIComponent(selectedRunId) + '/');
+      const sessionLine = data.run?.sessionId
+        ? '<div class="flex justify-between"><span class="text-gray-400">Session</span><span class="font-mono text-xs truncate" title="' + data.run.sessionId + '">' + data.run.sessionId + '</span></div>'
+        : '';
+      const dirLine = data.run?.directory
+        ? '<div class="flex justify-between"><span class="text-gray-400">Directory</span><span class="font-mono text-xs truncate" title="' + data.run.directory + '">' + data.run.directory + '</span></div>'
+        : '';
       statusDiv.innerHTML = \`
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
           <div class="bg-gray-900/50 rounded p-3 space-y-1">
@@ -161,7 +174,9 @@ export function getAdminHTML(): string {
             \${data.exitCode != null ? '<div class="flex justify-between"><span class="text-gray-400">Exit</span><span class="text-red-400">' + data.exitCode + '</span></div>' : ''}
           </div>
           <div class="bg-gray-900/50 rounded p-3 space-y-1">
-            <div class="flex justify-between"><span class="text-gray-400">UI</span><a class="text-blue-400" href="\${ui}" target="_blank">\${ui}</a></div>
+            <div class="flex justify-between gap-2"><span class="text-gray-400">UI</span><a class="text-blue-400 truncate" href="\${ui}" target="_blank" title="\${ui}">Open deep link</a></div>
+            \${sessionLine}
+            \${dirLine}
             <div class="flex justify-between"><span class="text-gray-400">Expires</span><span class="text-xs">\${data.run?.expiresAt ? new Date(data.run.expiresAt).toLocaleString() : 'n/a'}</span></div>
             <div class="flex justify-between"><span class="text-gray-400">Last change</span><span class="text-xs">\${data.lastChangeFormatted || 'n/a'}</span></div>
           </div>

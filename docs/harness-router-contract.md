@@ -67,7 +67,7 @@ Response `201`:
 }
 ```
 
-When `sessionId` + `directory` are present, `openCodeUrl` / `url` / `links.ui` are a **session deep link** under `/r/<runId>/…/session/…` (not the empty Projects home). Without a prompt session they remain `/r/<runId>/`. `GET /r/:runId` and `GET /r/:runId/` 302 to that deep link when meta has the session.
+When a `repo` is provided, bootstrap always creates a session in the cloned worktree (even without `prompt`) and returns `openCodeUrl` / `url` / `links.ui` as a **session deep link** `/r/<runId>/<cn(dir)>/session/<sessionId>` (or `/r/<runId>/<cn(dir)>/session` if session creation failed). Bare `/r/<runId>/` 302s to that deep link so the UI opens the worktree project — not `$HOME` (`.cache`/`.config`/`.local`/`.npm`). Clone failure returns 500 with `crashLog` / an explicit error (set `GIT_TOKEN` for private repos).
 
 Container ready still returns `success: true` even if session/prompt fails; check `prompt.ok` / `prompt.error`.
 

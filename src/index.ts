@@ -743,23 +743,41 @@ export class OpenCodeRunner extends Container<Env> {
   }
 
 
-  private async autoCreateSessionAndPrompt(opts: {
+  /**
+   * Ensure a session exists in the cloned worktree directory.
+   * Always creates a session (even without a prompt) so openCodeUrl can deep-link
+   * into the project. Optionally sends prompt_async when prompt text is non-empty.
+   * Also warms GET /project/current?directory= so the server registers the project.
+   */
+  private async ensureSession(opts: {
     repo?: string;
-    prompt: string;
+    prompt?: string;
     title?: string;
     model?: { providerID: string; modelID: string };
     agent?: string;
   }): Promise<PromptResult> {
     const directory = worktreeDirectory(opts.repo);
+    const promptText = (opts.prompt || "").trim();
     const title =
       (opts.title && opts.title.trim()) ||
-      opts.prompt.trim().slice(0, 80) ||
-      "Auto session";
-    const model = opts.model?.providerID && opts.model?.modelID
-      ? opts.model
-      : { ...DEFAULT_PROMPT_MODEL };
+      (promptText ? promptText.slice(0, 80) : "") ||
+      (opts.repo ? `Run · ${repoBasename(opts.repo) || "project"}` : "Run session");
+    const model =
+      opts.model?.providerID && opts.model?.modelID
+        ? opts.model
+        : { ...DEFAULT_PROMPT_MODEL };
 
     try {
+      // Warm/register the project for this directory (pinned OpenCode supports this).
+      try {
+        await this.containerFetch(
+          `http://127.0.0.1:${this.defaultPort}/project/current?directory=${encodeURIComponent(directory)}`,
+          this.defaultPort,
+        );
+      } catch {
+        /* best-effort */
+      }
+
       const sessionResp = await this.containerFetch(
         new Request(
           `http://127.0.0.1:${this.defaultPort}/session?directory=${encodeURIComponent(directory)}`,
@@ -794,8 +812,19 @@ export class OpenCodeRunner extends Container<Env> {
         };
       }
 
+      // No prompt → session alone is enough for UI deep-link into the project.
+      if (!promptText) {
+        return {
+          ok: true,
+          sessionId,
+          promptAccepted: false,
+          title,
+          directory,
+        };
+      }
+
       const promptBody: Record<string, unknown> = {
-        parts: [{ type: "text", text: opts.prompt }],
+        parts: [{ type: "text", text: promptText }],
         model,
       };
       if (opts.agent) promptBody.agent = opts.agent;
@@ -838,6 +867,24 @@ export class OpenCodeRunner extends Container<Env> {
         directory,
         error: e instanceof Error ? e.message : String(e),
       };
+    }
+  }
+
+  /** True when the worktree directory exists inside the container (clone succeeded). */
+  private async worktreeExists(directory: string): Promise<boolean> {
+    if (!directory || directory === "/home/dev") return true;
+    const base = directory.replace(/\/+$/, "").split("/").pop();
+    if (!base) return false;
+    try {
+      const listResp = await this.containerFetch(
+        `http://127.0.0.1:${this.defaultPort}/file?path=${encodeURIComponent("/home/dev")}&directory=${encodeURIComponent("/home/dev")}`,
+        this.defaultPort,
+      );
+      if (!listResp.ok) return false;
+      const entries = (await listResp.json()) as Array<{ name?: string; type?: string }>;
+      return entries.some((e) => e.name === base && e.type === "directory");
+    } catch {
+      return false;
     }
   }
 
@@ -929,7 +976,12 @@ export class OpenCodeRunner extends Container<Env> {
 
       if (crashed) {
         meta.status = "error";
-        meta.error = "OpenCode process exited; crash keep-alive is serving health";
+        const cloneFailed =
+          typeof crashLog === "string" &&
+          (crashLog.includes("clone failed") || crashLog.includes("Failed to clone"));
+        meta.error = cloneFailed
+          ? "Repo clone failed (check repo URL / GIT_TOKEN for private repos). See crashLog."
+          : "OpenCode process exited; crash keep-alive is serving health";
         await this.saveMeta(meta);
         await registryUpsert(this.env, {
           runId,
@@ -967,6 +1019,44 @@ export class OpenCodeRunner extends Container<Env> {
       // Capture models/agents/providers for harness-router (served later without an instance).
       const capabilities = await this.collectAndStoreCapabilities(runId);
 
+      // Always pin directory on meta when a repo was requested (UI deep links / redirects).
+      const directory = worktreeDirectory(body.repo);
+      meta.directory = directory;
+      await this.saveMeta(meta);
+
+      // If a repo was requested, the worktree must exist — otherwise the UI shows $HOME
+      // (.cache/.config/.local/.npm) and there is no project to open.
+      if (body.repo && body.repo.trim()) {
+        const present = await this.worktreeExists(directory);
+        if (!present) {
+          meta.status = "error";
+          meta.error =
+            `Clone missing at ${directory}. Check repo URL / GIT_TOKEN (private repos) / startup logs.`;
+          await this.saveMeta(meta);
+          await registryUpsert(this.env, {
+            runId,
+            status: "error",
+            createdAt,
+            expiresAt,
+            repo: body.repo,
+            branch: body.branch,
+            error: meta.error,
+          });
+          const crashLog = await this.tryFetchCrashLog();
+          return json(
+            {
+              success: false,
+              runId,
+              status: meta.status,
+              error: meta.error,
+              directory,
+              ...(crashLog ? { crashLog } : {}),
+            },
+            500,
+          );
+        }
+      }
+
       let prompt: PromptResult | undefined;
       const promptText = typeof body.prompt === "string" ? body.prompt.trim() : "";
       const autoPr = augmentPromptForRun(promptText, {
@@ -975,10 +1065,12 @@ export class OpenCodeRunner extends Container<Env> {
         workBranch,
         baseBranch: body.branch,
       });
-      if (autoPr.prompt) {
-        prompt = await this.autoCreateSessionAndPrompt({
+      // Always create a session in the worktree (even without a prompt) so openCodeUrl
+      // can deep-link into the API-started project/session.
+      if (body.repo && body.repo.trim()) {
+        prompt = await this.ensureSession({
           repo: body.repo,
-          prompt: autoPr.prompt,
+          prompt: autoPr.prompt || undefined,
           title: body.title,
           model: body.model,
           agent: body.agent,
@@ -991,6 +1083,7 @@ export class OpenCodeRunner extends Container<Env> {
       }
 
       return json({
+
         success: true,
         runId,
         status: meta.status,
@@ -1007,10 +1100,11 @@ export class OpenCodeRunner extends Container<Env> {
         ...(autoPr.autoPRSkippedReason
           ? { autoPRSkippedReason: autoPr.autoPRSkippedReason }
           : {}),
+        directory: meta.directory || directory,
+        sessionId: meta.sessionId || prompt?.sessionId,
         ...(prompt
           ? {
               prompt,
-              sessionId: prompt.sessionId,
               promptAccepted: prompt.promptAccepted ?? prompt.ok,
             }
           : {}),
@@ -1292,7 +1386,22 @@ function runSessionUrl(
   return `${origin}/r/${encodeURIComponent(runId)}${sessionDeepPath(directory, sessionId)}`;
 }
 
-/** Prefer session deep link when meta/prompt has sessionId + directory. */
+/** Project route (no session yet): /${cn(directory)}/session under /r/:runId/. */
+function projectDeepPath(directory: string): string {
+  return `/${encodeOpenCodeDir(directory)}/session`;
+}
+
+function runProjectUrl(originOrRequestUrl: string, runId: string, directory: string): string {
+  const origin = originOrRequestUrl.includes("://")
+    ? new URL(originOrRequestUrl).origin
+    : originOrRequestUrl;
+  return `${origin}/r/${encodeURIComponent(runId)}${projectDeepPath(directory)}`;
+}
+
+/**
+ * Prefer session deep link when meta has sessionId + directory.
+ * Else open the project session route so the UI shows the worktree (not $HOME).
+ */
 function openCodeUiUrl(
   requestUrl: string,
   runId: string,
@@ -1302,6 +1411,9 @@ function openCodeUiUrl(
   const directory = opts?.directory?.trim();
   if (sessionId && directory) {
     return runSessionUrl(requestUrl, runId, directory, sessionId);
+  }
+  if (directory && directory !== "/home/dev") {
+    return runProjectUrl(requestUrl, runId, directory);
   }
   return runUrl(requestUrl, runId);
 }
@@ -1677,8 +1789,9 @@ async function createRunResponse(
     prompt?.sessionId ||
     undefined;
   const directory =
+    (typeof payload.directory === "string" && payload.directory) ||
     (typeof prompt?.directory === "string" && prompt.directory) ||
-    (sessionId ? worktreeDirectory(body.repo) : undefined);
+    (body.repo ? worktreeDirectory(body.repo) : undefined);
   const url = openCodeUiUrl(requestUrl, runId, { sessionId, directory });
   // Asset/API links stay on the run root (not the session deep path).
   const rootUrl = runUrl(requestUrl, runId);
@@ -1758,7 +1871,9 @@ app.get("/api/runs/:runId", async (c) => {
   const runMeta = (status.run || null) as RunMeta | null;
   const url = openCodeUiUrl(c.req.url, runId, {
     sessionId: runMeta?.sessionId,
-    directory: runMeta?.directory || (runMeta?.sessionId ? worktreeDirectory(runMeta.repo) : undefined),
+    directory:
+      runMeta?.directory ||
+      (runMeta?.repo ? worktreeDirectory(runMeta.repo) : undefined),
   });
   return c.json({ runId, url, openCodeUrl: url, ...status });
 });
@@ -1827,9 +1942,14 @@ async function maybeRedirectToSession(
 ): Promise<Response | null> {
   const meta = await loadRunMeta(env, runId);
   const sessionId = meta?.sessionId?.trim();
-  const directory = (meta?.directory || (sessionId ? worktreeDirectory(meta?.repo) : undefined))?.trim();
-  if (!sessionId || !directory) return null;
-  const dest = `/r/${encodeURIComponent(runId)}${sessionDeepPath(directory, sessionId)}`;
+  const directory = (
+    meta?.directory ||
+    (meta?.repo ? worktreeDirectory(meta.repo) : undefined)
+  )?.trim();
+  if (!directory || directory === "/home/dev") return null;
+  const dest = sessionId
+    ? `/r/${encodeURIComponent(runId)}${sessionDeepPath(directory, sessionId)}`
+    : `/r/${encodeURIComponent(runId)}${projectDeepPath(directory)}`;
   // Preserve query string (rare) but stay under /r/
   const url = new URL(request.url);
   const location = dest + (url.search || "");
@@ -1897,11 +2017,16 @@ app.all("/r/:runId/*", async (c) => {
     return proxyRunDocument(c.env, runId, c.req.raw);
   }
 
-  // SPA deep link /${cn(dir)}/session/:id — serve index HTML so Solid can route
+  // SPA deep links — serve index HTML so Solid can route
   // (shim strips /r/:runId; forwarding the deep path to OpenCode would often 404).
+  // Supports:
+  //   /${cn(dir)}/session/:id   (legacy session deep link)
+  //   /${cn(dir)}/session       (project open / new session)
+  //   /server/:key/session/:id  (OpenCode 1.18+ new-layout redirect target)
   if (
     (c.req.method === "GET" || c.req.method === "HEAD") &&
-    /^\/[^/]+\/session\/[^/]+\/?$/.test(path)
+    (/^\/[^/]+\/session(?:\/[^/]+)?\/?$/.test(path) ||
+      /^\/server\/[^/]+\/session\/[^/]+\/?$/.test(path))
   ) {
     return proxyRunDocument(c.env, runId, c.req.raw);
   }
@@ -1950,7 +2075,17 @@ app.all("/admin/api/:action", async (c) => {
     if (!runId) return c.json({ error: "Invalid runId" }, 400);
     const container = getContainer(c.env.OPENCODE_CONTAINER, runId);
     if (action === "status" || action === "config") {
-      return container.fetch(new Request(`http://localhost/__admin/${action}`));
+      const resp = await container.fetch(new Request(`http://localhost/__admin/${action}`));
+      if (action === "config") return resp;
+      const status = (await resp.json().catch(() => ({}))) as Record<string, unknown>;
+      const runMeta = (status.run || null) as RunMeta | null;
+      const url = openCodeUiUrl(c.req.url, runId, {
+        sessionId: runMeta?.sessionId,
+        directory:
+          runMeta?.directory ||
+          (runMeta?.repo ? worktreeDirectory(runMeta.repo) : undefined),
+      });
+      return c.json({ ...status, openCodeUrl: url, url });
     }
     if (["start", "stop", "restart", "refresh-capabilities"].includes(action)) {
       return container.fetch(new Request(`http://localhost/__admin/${action}`, { method: "POST" }));

@@ -95,7 +95,7 @@ Optional fields:
 - **`autoPR`** / **`autoCreatePR`** — when `true` and agent is not `plan`, appends draft-PR instructions (`gh pr create --draft` from the same `workBranch`) to the prompt. Plan mode skips this (`autoPRApplied: false`, `autoPRSkippedReason: "plan-mode"`). Response echoes `autoPR`, `autoPRApplied`, `workBranch`, and `sleepAfter`.
 - **Work branch** — every run with a prompt (non-plan) gets a standing instruction to commit + `git push -u origin opencode/<runId>` after code changes so wake can restore the tree.
 
-Response includes `openCodeUrl` / `url` — when a prompt auto-starts a session this is a **session deep link** (`/r/<runId>/<cn(dir)>/session/<sessionId>`); otherwise `/r/<runId>/`. Opening either shows the chat (document entry 302s to the session when meta has `sessionId`+`directory`). Put that link in Linear.
+Response includes `openCodeUrl` / `url` — with a `repo`, this is a **session deep link** (`/r/<runId>/<cn(dir)>/session/<sessionId>`) created even without `prompt`. Opening it shows the cloned project (not `$HOME`). Document entry `/r/<runId>/` 302s to that deep link. Put that link in Linear. Private repos need `GIT_TOKEN`.
 
 ### Status / lifecycle
 
