@@ -119,6 +119,24 @@ function emptyCapabilities(error?: string): RunnerCapabilities {
   };
 }
 
+/** Keep DO/cache payloads small — OpenCode /provider can be multi‑MB. */
+function slimProvider(p: Record<string, unknown>): Record<string, unknown> {
+  const modelsIn = (p.models || {}) as Record<string, { name?: string } | string>;
+  const models: Record<string, { id: string; name?: string }> = {};
+  if (modelsIn && typeof modelsIn === "object" && !Array.isArray(modelsIn)) {
+    for (const [modelId, meta] of Object.entries(modelsIn)) {
+      const name = typeof meta === "string" ? meta : meta?.name;
+      models[modelId] = name ? { id: modelId, name } : { id: modelId };
+    }
+  }
+  return {
+    id: p.id ?? p.providerID ?? p.name,
+    name: p.name,
+    source: p.source,
+    models,
+  };
+}
+
 function normalizeCapabilities(
   sourceRunId: string,
   parts: {
@@ -142,20 +160,24 @@ function normalizeCapabilities(
     default?: Record<string, string>;
   } | undefined;
 
+  // Prefer /config/providers (connected, ~100KB) over /provider (all known, multi‑MB).
+  const providerList = (
+    configProviders?.providers ||
+    provider?.all ||
+    []
+  ) as Array<Record<string, unknown>>;
+  const slimProviders = providerList.map(slimProvider);
+
   const models: RunnerCapabilities["models"] = [];
-  const providerList = (provider?.all || configProviders?.providers || []) as Array<Record<string, unknown>>;
-  for (const p of providerList) {
-    const providerID = String(p.id || p.providerID || p.name || "");
-    const modelMap = (p.models || {}) as Record<string, { name?: string } | string>;
-    if (modelMap && typeof modelMap === "object" && !Array.isArray(modelMap)) {
-      for (const [modelId, meta] of Object.entries(modelMap)) {
-        const name = typeof meta === "string" ? meta : meta?.name;
-        models.push({
-          id: providerID ? `${providerID}/${modelId}` : modelId,
-          providerID: providerID || undefined,
-          name,
-        });
-      }
+  for (const p of slimProviders) {
+    const providerID = String(p.id || "");
+    const modelMap = (p.models || {}) as Record<string, { name?: string }>;
+    for (const [modelId, meta] of Object.entries(modelMap)) {
+      models.push({
+        id: providerID ? `${providerID}/${modelId}` : modelId,
+        providerID: providerID || undefined,
+        name: meta?.name,
+      });
     }
   }
 
@@ -172,15 +194,14 @@ function normalizeCapabilities(
     version: health?.version ?? null,
     defaultModel: defaultModel ? String(defaultModel) : null,
     connectedProviders: provider?.connected || [],
-    providers: providerList,
+    providers: slimProviders,
     models,
     agents: Array.isArray(parts.agents) ? parts.agents : [],
     commands: Array.isArray(parts.commands) ? parts.commands : [],
+    // Omit raw provider dump — it can be multi‑MB and breaks DO persistence.
     raw: {
       health: parts.health,
       config: parts.config,
-      configProviders: parts.configProviders,
-      provider: parts.provider,
     },
   };
 }
@@ -710,11 +731,12 @@ export class OpenCodeRunner extends Container<Env> {
       }
     };
 
+    // Intentionally skip /provider (multi‑MB "all providers" catalog).
+    // /config/providers covers connected providers + models for harness pickers.
     await Promise.all([
       settle("health", "/global/health"),
       settle("config", "/config"),
       settle("configProviders", "/config/providers"),
-      settle("provider", "/provider"),
       settle("agents", "/agent"),
       settle("commands", "/command"),
     ]);
@@ -726,13 +748,30 @@ export class OpenCodeRunner extends Container<Env> {
     }
 
     try {
-      await capabilitiesStub(this.env).fetch(
+      const body = JSON.stringify(caps);
+      // DO values should stay well under ~1MB; refuse oversized snapshots early.
+      if (body.length > 900_000) {
+        caps.available = false;
+        caps.error = `Capabilities payload too large (${body.length} bytes)`;
+        caps.providers = [];
+        caps.models = caps.models.slice(0, 200);
+        caps.raw = { health: parts.health, config: parts.config };
+      }
+      const storeBody = JSON.stringify(caps);
+      const storeResp = await capabilitiesStub(this.env).fetch(
         new Request("http://capabilities/store", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(caps),
+          body: storeBody,
         }),
       );
+      if (!storeResp.ok) {
+        const detail = await storeResp.text().catch(() => "");
+        console.error("capabilities store failed", storeResp.status, detail.slice(0, 500));
+        caps.error =
+          caps.error ||
+          `Failed to persist capabilities cache (${storeResp.status})`;
+      }
     } catch (e) {
       console.error("Failed to persist capabilities cache", e);
       caps.error = caps.error || (e instanceof Error ? e.message : String(e));
@@ -1911,6 +1950,16 @@ app.post("/api/runs/:runId/restart", async (c) => {
   return container.fetch(new Request("http://localhost/__admin/restart", { method: "POST" }));
 });
 
+app.post("/api/runs/:runId/refresh-capabilities", async (c) => {
+  if (!requireRunnerAuth(c)) return c.json({ error: "Unauthorized" }, 401);
+  const runId = sanitizeRunId(c.req.param("runId"));
+  if (!runId) return c.json({ error: "Invalid runId" }, 400);
+  const container = getContainer(c.env.OPENCODE_CONTAINER, runId);
+  return container.fetch(
+    new Request("http://localhost/__admin/refresh-capabilities", { method: "POST" }),
+  );
+});
+
 app.get("/api/runs/:runId", async (c) => {
   if (!requireRunnerAuth(c)) return c.json({ error: "Unauthorized" }, 401);
   const runId = sanitizeRunId(c.req.param("runId"));
@@ -2212,6 +2261,7 @@ app.all("*", async (c) => {
       startRun: "POST /api/runs/:runId/start",
       stopRun: "POST /api/runs/:runId/stop",
       restartRun: "POST /api/runs/:runId/restart",
+      refreshCapabilities: "POST /api/runs/:runId/refresh-capabilities",
       deleteRun: "DELETE /api/runs/:runId",
       openRun: "/r/:runId/",
       capabilities: "GET /api/capabilities",
