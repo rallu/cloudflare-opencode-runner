@@ -712,7 +712,14 @@ export class OpenCodeRunner extends Container<Env> {
         );
         if (!resp.ok) continue;
         const text = await resp.text();
-        if (text) return text.slice(0, 32_000);
+        // OpenCode SPA returns HTML for unknown routes when still running after a
+        // failed clone (old images). Only accept plain startup/crash logs.
+        if (!text) continue;
+        const trimmed = text.trimStart();
+        if (trimmed.startsWith("<!") || trimmed.startsWith("<html") || trimmed.startsWith("<HTML")) {
+          continue;
+        }
+        return text.slice(0, 32_000);
       } catch {
         /* retry */
       }
@@ -1797,7 +1804,9 @@ async function createRunResponse(
   const rootUrl = runUrl(requestUrl, runId);
 
   if (!bootstrap.ok) {
-    return new Response(JSON.stringify({ ...payload, url, openCodeUrl: url }), {
+    // On failure (e.g. clone missing), do not deep-link into a non-existent project.
+    const failUrl = rootUrl;
+    return new Response(JSON.stringify({ ...payload, url: failUrl, openCodeUrl: failUrl }), {
       status: bootstrap.status,
       headers: { "Content-Type": "application/json" },
     });
