@@ -355,6 +355,36 @@ export class RunsRegistry extends DurableObject<Env> {
   }
 }
 
+
+/** Normalize owner/repo or URL to https://github.com/owner/repo.git (no credentials). */
+function normalizeGitHubRepoUrl(repo: string): string {
+  let s = repo.trim().replace(/\/+$/, "");
+  if (!s) return s;
+  // git@github.com:owner/repo(.git)
+  const ssh = s.match(/^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/i);
+  if (ssh) return `https://github.com/${ssh[1]}/${ssh[2].replace(/\.git$/i, "")}.git`;
+  // https://github.com/owner/repo(.git) or with optional credentials already present
+  const https = s.match(/^https?:\/\/(?:[^@\/]+@)?github\.com\/([^/]+)\/([^/?#]+?)(?:\.git)?\/?$/i);
+  if (https) return `https://github.com/${https[1]}/${https[2].replace(/\.git$/i, "")}.git`;
+  // owner/repo
+  const short = s.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/);
+  if (short) return `https://github.com/${short[1]}/${short[2]}.git`;
+  return s;
+}
+
+/**
+ * Embed token for git clone/fetch. Fine-grained PATs need username `x-access-token`
+ * (classic `https://TOKEN@github.com/` often fails with "clone missing").
+ * Never log the returned URL.
+ */
+function withGitHubToken(repoUrl: string, token: string | undefined): string {
+  const t = (token || "").trim();
+  if (!t) return repoUrl;
+  const norm = normalizeGitHubRepoUrl(repoUrl);
+  if (!/^https:\/\/github\.com\//i.test(norm)) return repoUrl;
+  return norm.replace(/^https:\/\/github\.com\//i, `https://x-access-token:${t}@github.com/`);
+}
+
 function repoBasename(repo: string | undefined | null): string | null {
   if (!repo?.trim()) return null;
   const cleaned = repo.trim().replace(/\/+$/, "");
@@ -497,13 +527,23 @@ export class OpenCodeRunner extends Container<Env> {
     await this.ctx.storage.put("meta", meta);
   }
 
-  private buildEnvVars(meta: RunMeta | null): Record<string, string> {
+    private buildEnvVars(meta: RunMeta | null): Record<string, string> {
     const repo = meta?.repo?.trim();
     const branch = meta?.branch?.trim();
     const workBranch =
       meta?.workBranch?.trim() ||
       (meta?.runId ? workBranchName(meta.runId) : "");
-    let gitRepos = repo || this.env.GIT_REPOS || "";
+    // Normalize + embed x-access-token so live containers clone fine-grained PATs
+    // even before startup.sh insteadOf is rebuilt into the image.
+    const rawRepos = repo || this.env.GIT_REPOS || "";
+    const gitRepos = rawRepos
+      ? rawRepos
+          .split(",")
+          .map((r) => r.trim())
+          .filter(Boolean)
+          .map((r) => withGitHubToken(normalizeGitHubRepoUrl(r), this.env.GIT_TOKEN))
+          .join(",")
+      : "";
     const setupCmds = (meta?.setup || []).map((c) => String(c).trim()).filter(Boolean);
     return {
       OPENCODE_PERMISSION: '{"edit":"allow","bash":"allow","write":"allow"}',

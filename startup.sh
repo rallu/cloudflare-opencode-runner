@@ -11,7 +11,7 @@ echo "which opencode: $(command -v opencode || echo MISSING)" >> /tmp/opencode.l
 echo "which node: $(command -v node || echo MISSING)" >> /tmp/opencode.log
 
 if [ -n "$GIT_TOKEN" ]; then
-  git config --global url."https://${GIT_TOKEN}@github.com/".insteadOf "https://github.com/" >> /tmp/opencode.log 2>&1 || true
+  git config --global url."https://x-access-token:${GIT_TOKEN}@github.com/".insteadOf "https://github.com/" >> /tmp/opencode.log 2>&1 || true
 fi
 FIRST_REPO_DIR=""
 if [ -n "$GIT_REPOS" ]; then
@@ -21,14 +21,14 @@ if [ -n "$GIT_REPOS" ]; then
     [ -z "$repo" ] && continue
     repo_name=$(basename "$repo" .git)
     if [ ! -d "$repo_name" ]; then
-      echo "Cloning $repo..." >> /tmp/opencode.log
+      echo "Cloning $(echo "$repo" | sed -E "s#https://[^@/]+@#https://***@#")..." >> /tmp/opencode.log
       # Prefer base RUN_BRANCH when set; fall back to default branch.
       if [ -n "$RUN_BRANCH" ]; then
         git clone --branch "$RUN_BRANCH" --single-branch "$repo" "$repo_name" >> /tmp/opencode.log 2>&1 \
           || git clone "$repo" "$repo_name" >> /tmp/opencode.log 2>&1 \
-          || echo "Failed to clone $repo" >> /tmp/opencode.log
+          || echo "Failed to clone $(echo "$repo" | sed -E "s#https://[^@/]+@#https://***@#")" >> /tmp/opencode.log
       else
-        git clone "$repo" "$repo_name" >> /tmp/opencode.log 2>&1 || echo "Failed to clone $repo" >> /tmp/opencode.log
+        git clone "$repo" "$repo_name" >> /tmp/opencode.log 2>&1 || echo "Failed to clone $(echo "$repo" | sed -E "s#https://[^@/]+@#https://***@#")" >> /tmp/opencode.log
       fi
     fi
 
