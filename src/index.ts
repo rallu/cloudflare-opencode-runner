@@ -1980,9 +1980,27 @@ app.all("/admin/api/:action", async (c) => {
  * at host root. If oc_run cookie is set, proxy those to the run container unchanged.
  * Reserved prefixes (/api, /admin, /r, /worker-health) are never fallthrough targets
  * here because they already have routes; this catch-all only sees unmatched paths.
+ *
+ * Bare "/" is special: never serve the API catalog or sticky OpenCode HTML there.
+ * With oc_run → redirect into /r/:runId/; without → /admin. That stops the flip
+ * between JSON listing and the last-opened UI when visiting the host root.
  */
 app.all("*", async (c) => {
-  const path = new URL(c.req.url).pathname;
+  const url = new URL(c.req.url);
+  const path = url.pathname;
+  const cookies = parseCookies(c.req.header("Cookie"));
+  const sticky = sanitizeRunId(cookies[OC_RUN_COOKIE] || "");
+
+  if (path === "/" || path === "") {
+    if (c.req.method === "GET" || c.req.method === "HEAD") {
+      if (sticky) {
+        return c.redirect(`/r/${encodeURIComponent(sticky)}/${url.search}`, 302);
+      }
+      return c.redirect(`/admin${url.search}`, 302);
+    }
+    return c.json({ error: "Use /admin or /r/:runId/" }, 404);
+  }
+
   const reserved =
     path.startsWith("/api/") ||
     path === "/api" ||
@@ -1992,15 +2010,11 @@ app.all("*", async (c) => {
     path === "/worker-health" ||
     path.startsWith("/worker-health/");
 
-  if (!reserved) {
-    const cookies = parseCookies(c.req.header("Cookie"));
-    const sticky = sanitizeRunId(cookies[OC_RUN_COOKIE] || "");
-    if (sticky) {
-      return proxyToRun(c.env, sticky, c.req.raw, {
-        setStickyCookie: true,
-        rewriteHtml: true,
-      });
-    }
+  if (!reserved && sticky) {
+    return proxyToRun(c.env, sticky, c.req.raw, {
+      setStickyCookie: true,
+      rewriteHtml: true,
+    });
   }
 
   return c.json(
